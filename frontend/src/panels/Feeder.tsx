@@ -9,9 +9,10 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
   const pokeRefresh = () => [700, 1400, 2100, 2800, 3500, 4200].forEach((d) => setTimeout(refresh, d));
 
   async function act(action: string) {
-    if (!confirm(`${action[0].toUpperCase() + action.slice(1)} the feeder now?`)) return;
+    const verb = action === "power_cycle" ? "Power-cycle" : action[0].toUpperCase() + action.slice(1);
+    if (!confirm(`${verb} the feeder now?`)) return;
     await api.post(`/api/feeder/${action}`);
-    toast(`${action[0].toUpperCase() + action.slice(1)} requested`);
+    toast(`${action === "power_cycle" ? "Power cycle" : action[0].toUpperCase() + action.slice(1)} requested`);
     pokeRefresh();
   }
   async function feedNow() {
@@ -33,12 +34,14 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
         <span className={`pill ${s?.dry_run ? "text-pearl border-pearl/40" : "text-teal border-teal/40"}`}>
           {s?.dry_run ? "dry run" : "live"}
         </span>
+        {s?.plug_off && <span className="pill text-bad border-bad/40">power cycling</span>}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button variant="primary" onClick={feedNow}>Feed now</Button>
         <Button onClick={() => act("open")}>Open</Button>
         <Button onClick={() => act("close")}>Close</Button>
         <Button onClick={() => act("rotate")}>Rotate</Button>
+        {s?.power_cycle_available && <Button onClick={() => act("power_cycle")}>Power cycle</Button>}
       </div>
       <div className="text-muted text-xs mt-2.5">
         Buttons ask the feeder to act on its next check (a second or two). Nothing moves in dry‑run mode.

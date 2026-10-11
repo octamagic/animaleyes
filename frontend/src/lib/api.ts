@@ -35,6 +35,9 @@ export type Status = {
   llm_model: string;
   identifier: string;
   ptz_available: boolean;
+  power_cycle_available: boolean;
+  plug_off: boolean;
+  plug_cycled_at: string | null;
   last_verdict: Verdict | null;
   last_verdict_age_s: number | null;
   last_llm_at: string | null;

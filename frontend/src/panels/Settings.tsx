@@ -37,6 +37,10 @@ const CONTROLS: Ctl[] = [
   { key: "WATCH_INTERVAL_S", label: "Seconds between always-on checks", type: "number", group: "Training" },
   { key: "LID_POLL_S", label: "Lid check interval (sec)", type: "number", group: "Advanced" },
   { key: "FEED_RETRY_BACKOFF_S", label: "Backoff after a failed feed (sec)", type: "number", group: "Advanced" },
+  { key: "POWER_CYCLE_ON_FAULT", label: "Power-cycle the feeder on a device fault", type: "bool", group: "Feeder power" },
+  { key: "POWER_CYCLE_OFF_S", label: "Keep it off for (sec)", type: "number", group: "Feeder power" },
+  { key: "POWER_CYCLE_BOOT_S", label: "Wait for it to boot before commands (sec)", type: "number", group: "Feeder power" },
+  { key: "POWER_CYCLE_MIN_GAP_MIN", label: "At most one automatic cycle per (min)", type: "number", group: "Feeder power" },
   { key: "HEARTBEAT_MIN", label: "Heartbeat interval (min)", type: "number", group: "Advanced" },
   { key: "DASH_AUTH", label: "Dashboard auth", type: "select", group: "Advanced", opts: ["tailscale", "basic", "none"] },
 ];

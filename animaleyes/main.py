@@ -25,6 +25,7 @@ from .machine import Machine
 from .motion import MotionDetector
 from .notify import EmailNotifier, MultiNotifier, PushoverNotifier, SlackNotifier
 from .personas import PersonaStore
+from .power import build_power_switch
 from .ptz import Ptz
 from .store import Store
 from .themes import ThemeStore
@@ -200,6 +201,13 @@ def build(
         capture_gate=capture_gate(llm, config),
         capture_dir=DATA_DIR / "training" / "unlabeled",
         healthcheck=_healthcheck(secrets.healthcheck_url),
+        power=build_power_switch(
+            secrets.smart_plug_host,
+            secrets.smart_plug_user,
+            secrets.smart_plug_password,
+            secrets.smart_plug_off_cmd,
+            secrets.smart_plug_on_cmd,
+        ),
     )
     return machine, camera, config, store, llm, events, personas
 

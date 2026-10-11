@@ -21,6 +21,17 @@ log = logging.getLogger(__name__)
 TOKEN_ERRORS = ("code 1009", "No cached token", "login` first", "Token expired")
 
 
+# Error texts that come from the feeder itself (motor stuck, radio not answering), as opposed to
+# the cloud, the network or our login. Seen so far: code=2043 "电机异常无法关门" (motor fault,
+# cannot close), code=2020 "Device response timeout". A power cycle fixes these; nothing else does.
+DEVICE_FAULT_SIGNS = ("code=20", "device response timeout", "电机", "motor")
+
+
+def is_device_fault(message: str) -> bool:
+    m = message.lower()
+    return any(sign.lower() in m for sign in DEVICE_FAULT_SIGNS)
+
+
 class FeederError(Exception):
     pass
 

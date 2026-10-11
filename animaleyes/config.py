@@ -44,6 +44,13 @@ class Settings:
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
     CAMERA_FPS: int = 8  # frames/sec ffmpeg pulls; higher = smoother live view (restart to apply)
     FEED_RETRY_BACKOFF_S: int = 120  # after a failed open, wait before trying to open again
+    # Smart plug on the feeder's power (SMART_PLUG_* in .env). A device-side fault (motor stuck,
+    # no response) pulls the plug at once, off for POWER_CYCLE_OFF_S, then no feeder commands
+    # for POWER_CYCLE_BOOT_S while it boots. At most one automatic cycle per MIN_GAP.
+    POWER_CYCLE_ON_FAULT: bool = True
+    POWER_CYCLE_OFF_S: int = 10
+    POWER_CYCLE_BOOT_S: int = 90
+    POWER_CYCLE_MIN_GAP_MIN: int = 10
     LID_POLL_S: int = 20  # how often to read the feeder's real lid state (0 = never)
     # Dashboard auth: "tailscale" = trust any device on the tailnet (no password), basic-auth
     # fallback off-tailnet; "basic" = always require the password; "none" = open (don't).
@@ -197,6 +204,13 @@ class Secrets:
     pushover_token: str = ""  # Pushover app token (emergency-priority wake-me alerts)
     pushover_user: str = ""  # Pushover user/group key
     healthcheck_url: str = ""  # dead-man's-switch: pinged each heartbeat; alerts if pings stop
+    # Smart plug on the feeder's power: a Kasa/Tapo plug's LAN address (+ Tapo credentials),
+    # or a pair of shell commands for any other kind of plug.
+    smart_plug_host: str = ""
+    smart_plug_user: str = ""
+    smart_plug_password: str = ""
+    smart_plug_off_cmd: str = ""
+    smart_plug_on_cmd: str = ""
 
     @classmethod
     def from_env(cls) -> Secrets:
@@ -221,6 +235,11 @@ class Secrets:
             pushover_token=env("PUSHOVER_TOKEN", ""),
             pushover_user=env("PUSHOVER_USER", ""),
             healthcheck_url=env("HEALTHCHECK_URL", ""),
+            smart_plug_host=env("SMART_PLUG_HOST", ""),
+            smart_plug_user=env("SMART_PLUG_USER", ""),
+            smart_plug_password=env("SMART_PLUG_PASSWORD", ""),
+            smart_plug_off_cmd=env("SMART_PLUG_OFF_CMD", ""),
+            smart_plug_on_cmd=env("SMART_PLUG_ON_CMD", ""),
         )
 
     def alert_recipients(self) -> list[str]:
