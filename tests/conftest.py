@@ -80,6 +80,7 @@ class FakeFeeder:
         self.plate = plate
         self.calls: list[str] = []
         self.fail_open = False
+        self.open_error = "cloud said no"  # the FeederError text when fail_open is set
         self.fail_close = False
         self.nothing_to_close = False
 
@@ -92,7 +93,7 @@ class FakeFeeder:
 
     def open_now(self, plate: int) -> None:
         if self.fail_open:
-            raise FeederError("cloud said no")
+            raise FeederError(self.open_error)
         self.calls.append(f"open:{plate}")
         self._open = True
 
@@ -128,6 +129,7 @@ class Harness:
         self.feeder = FakeFeeder()
         self.notifier = LogNotifier()
         self.capture_gate = None  # tests set this to a FakeLLM to exercise capture mode
+        self.power = None  # tests set this to a FakePower to exercise power cycling
         self.machine = self.new_machine()
 
     def new_machine(self) -> Machine:
@@ -145,6 +147,7 @@ class Harness:
             dashboard_url="http://dash",
             capture_gate=self.capture_gate,
             capture_dir=self.tmp_path / "unlabeled",
+            power=self.power,
         )
 
     def load_plates(self, *plates: int) -> None:

@@ -27,6 +27,9 @@ export const EVENTS: Record<string, [string, string]> = {
   manual_close_noop: ["⚠️", "Close not sent — feeder says it's already closed"],
   manual_rotate: ["🔄", "Rotated by hand"], manual_open_failed: ["⚠️", "Manual open failed"],
   manual_close_failed: ["⚠️", "Manual close failed"], manual_rotate_failed: ["⚠️", "Manual rotate failed"],
+  power_cycle: ["🔌", "Feeder power cycled"], power_cycle_failed: ["⚠️", "Power cycle failed"],
+  power_cycle_skipped: ["🔌", "Power cycle skipped (too soon)"], power_on: ["🔌", "Feeder power restored"],
+  power_on_failed: ["⚠️", "Could not restore feeder power"], manual_power_cycle: ["🔌", "Power cycle (dry run)"],
   config: ["⚙️", "Settings changed"],
 };
 

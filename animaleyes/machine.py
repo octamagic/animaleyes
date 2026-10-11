@@ -23,9 +23,10 @@ from typing import Any
 
 from .camera import Frame, FrameBuffer
 from .config import ConfigStore, Settings
-from .feeder import Feeder, FeederError
+from .feeder import Feeder, FeederError, is_device_fault
 from .motion import MotionDetector
 from .notify import Notifier
+from .power import PowerError, PowerSwitch
 from .store import Store
 from .vision import FeedingVerdict, Identifier, Verdict
 
@@ -73,8 +74,12 @@ class Machine:
         capture_gate: Identifier | None = None,
         capture_dir: Path | None = None,
         healthcheck: Callable[[], None] | None = None,
+        power: PowerSwitch | None = None,
     ):
         self.config = config
+        # The smart plug on the feeder's power, or None. Device-side faults (motor stuck, no
+        # response) trigger a power cycle; see _feeder_fault.
+        self.power = power
         self.store = store
         self.frames = frames
         self.motion = motion
@@ -131,7 +136,83 @@ class Machine:
         )
 
     def _feeder(self) -> Feeder:
-        return self.dry_feeder if self.settings.DRY_RUN else self.real_feeder
+        if self.settings.DRY_RUN:
+            return self.dry_feeder
+        return _FaultWatch(self.real_feeder, self)  # type: ignore[return-value]
+
+    # feeder power -----------------------------------------------------
+    def plug_is_off(self) -> bool:
+        off, on = self._when("plug_off_at"), self._when("plug_on_at")
+        return bool(off and (on is None or on < off))
+
+    def _feeder_fault(self, exc: FeederError) -> None:
+        """Called by the feeder proxy on every FeederError. A fault from the device itself gets
+        the plug pulled (immediately, as asked: nothing else recovers a stuck motor)."""
+        if self.power is None or not self.settings.POWER_CYCLE_ON_FAULT:
+            return
+        if not is_device_fault(str(exc)):
+            return  # cloud, network or login trouble: a reboot won't help
+        self._power_cycle(self.clock(), f"feeder fault: {exc}")
+
+    def _power_cycle(self, now: datetime, reason: str, manual: bool = False) -> bool:
+        if self.power is None:
+            return False
+        if self.plug_is_off():
+            return False  # already mid-cycle
+        last = self._when("plug_cycled_at")
+        gap = timedelta(minutes=self.settings.POWER_CYCLE_MIN_GAP_MIN)
+        if not manual and last and now - last < gap:
+            self._log_once(
+                now,
+                "power_cycle_skipped",
+                f"{reason}; last power cycle {int((now - last).total_seconds() // 60)} min ago",
+                VETO_REPEAT_S,
+                notify=True,
+            )
+            return False
+        # Persist first: if we die between "off" and "on", the next start turns it back on.
+        self.store.set("plug_cycled_at", now.isoformat())
+        self.store.set("plug_off_at", now.isoformat())
+        self.store.set("plug_on_at", None)
+        try:
+            self.power.turn_off()
+        except PowerError as exc:
+            self.store.set("plug_off_at", None)  # unknown state; don't pretend it's off
+            event_id = self.store.add_event(now, "power_cycle_failed", str(exc), {"why": reason})
+            self._notify(f"FEEDER POWER CYCLE FAILED: {exc} ({reason})", event_id, urgent=True)
+            return False
+        event_id = self.store.add_event(
+            now,
+            "power_cycle",
+            reason,
+            {"manual": manual, "off_s": self.settings.POWER_CYCLE_OFF_S},
+            self._save_frames("power_cycle", self.frames.latest(1)),
+        )
+        self._notify(
+            f"FEEDER POWER CYCLED: {reason}. Off {self.settings.POWER_CYCLE_OFF_S}s, then "
+            f"waiting {self.settings.POWER_CYCLE_BOOT_S}s for it to boot.",
+            event_id,
+            urgent=not manual,
+        )
+        return True
+
+    def _tick_power(self, now: datetime) -> None:
+        """Finish a power cycle: turn the plug back on once it has been off long enough. Retries
+        every tick until it succeeds; the feeder must never be left without power."""
+        if self.power is None or not self.plug_is_off():
+            return
+        off_at = self._when("plug_off_at")
+        if off_at and now - off_at < timedelta(seconds=self.settings.POWER_CYCLE_OFF_S):
+            return
+        try:
+            self.power.turn_on()
+        except PowerError as exc:
+            self._log_once(now, "power_on_failed", str(exc), 60, notify=True, urgent=True)
+            return
+        self.store.set("plug_on_at", now.isoformat())
+        self.store.set("feed_failed_at", None)
+        event_id = self.store.add_event(now, "power_on", "feeder power restored", {})
+        self._notify("feeder power restored; it should be back in a minute or two", event_id)
 
     # startup -----------------------------------------------------------
     def start(self) -> None:
@@ -160,6 +241,7 @@ class Machine:
         self._check_camera(now)
         self._heartbeat(now)
         self._poll_lid(now)
+        self._tick_power(now)
         self._consume_dashboard_requests(now)
         if self.settings.CAPTURE_MODE:
             self._tick_capture(now)
@@ -571,6 +653,11 @@ class Machine:
         failed = self._when("feed_failed_at")
         if failed and now - failed < timedelta(seconds=self.settings.FEED_RETRY_BACKOFF_S):
             return f"feed failed {int((now - failed).total_seconds())}s ago < FEED_RETRY_BACKOFF_S"
+        if self.plug_is_off():
+            return "feeder is power-cycling"
+        on_at = self._when("plug_on_at")
+        if on_at and now - on_at < timedelta(seconds=self.settings.POWER_CYCLE_BOOT_S):
+            return f"feeder rebooted {int((now - on_at).total_seconds())}s ago < POWER_CYCLE_BOOT_S"
         return None
 
     def _check_veto(self, now: datetime) -> None:
@@ -667,6 +754,7 @@ class Machine:
         frames: list[str] | Callable[[], list[str]] | None = None,
         notify: bool = False,
         dedupe: str | None = None,
+        urgent: bool = False,
     ) -> None:
         # `dedupe` narrows the repeat window below the event kind (e.g. per animal); persisted
         # so a restart doesn't re-announce what was just announced.
@@ -682,7 +770,7 @@ class Machine:
             frames = frames()
         event_id = self.store.add_event(now, kind, reason, data, frames)
         if notify:
-            self._notify(f"{kind}: {reason}", event_id)
+            self._notify(f"{kind}: {reason}", event_id, urgent=urgent)
 
     def _tick_watch(self, now: datetime) -> None:
         """Always-on local look at the bowl, so the log and the dashboard know who's there even
@@ -844,7 +932,7 @@ class Machine:
         # these flags; the machine is still the sole caller of the feeder. POC: these are
         # raw maintenance actions (open/close/rotate the tray by hand); they log an event and
         # honour DRY_RUN but deliberately do not touch the feeding counters or FSM state.
-        for action in ("open", "close", "rotate"):
+        for action in ("open", "close", "rotate", "power_cycle"):
             if self.store.get(f"manual_{action}_requested"):
                 self.store.set(f"manual_{action}_requested", None)
                 self._manual_action(now, action)
@@ -858,6 +946,12 @@ class Machine:
             self._tick_opening(now, trigger="manual feed from dashboard")
 
     def _manual_action(self, now: datetime, action: str) -> None:
+        if action == "power_cycle":
+            if self.settings.DRY_RUN:
+                self.store.add_event(now, "manual_power_cycle", "dashboard (DRY_RUN): not sent", {})
+                return
+            self._power_cycle(now, "dashboard", manual=True)
+            return
         feeder = self._feeder()
         mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
         try:
@@ -905,7 +999,7 @@ class Machine:
 
     def request_manual_action(self, action: str) -> None:
         """Enqueue a raw open/close/rotate for the machine to perform on its next tick."""
-        if action not in ("open", "close", "rotate"):
+        if action not in ("open", "close", "rotate", "power_cycle"):
             raise ValueError(f"unknown feeder action {action!r}")
         self.store.set(f"manual_{action}_requested", 1)
 
@@ -917,6 +1011,9 @@ class Machine:
             "plates_tried": self.plates_tried(),
             "feeds_this_window": self.store.get_int("feeds_this_window"),
             "last_open_at": self.store.get("last_open_at"),
+            "power_cycle_available": self.power is not None,
+            "plug_off": self.plug_is_off(),
+            "plug_cycled_at": self.store.get("plug_cycled_at"),
             "opened_at": self.store.get("opened_at") if self.state == State.FEEDING else None,
             "feeding_plate": self.store.get("feeding_plate")
             if self.state == State.FEEDING
@@ -928,3 +1025,36 @@ class Machine:
         if not last_fed:
             return None
         return last_fed + timedelta(minutes=self.settings.MIN_GAP_MIN)
+
+
+class _FaultWatch:
+    """The real feeder, with every FeederError reported to the machine before it propagates, and
+    no commands sent at all while the plug is off (they'd only time out against a dead device)."""
+
+    def __init__(self, feeder: Feeder, machine: Machine):
+        self._feeder = feeder
+        self._machine = machine
+
+    def _call(self, name: str, *args):
+        if self._machine.plug_is_off():
+            raise FeederError("feeder is power-cycling; command not sent")
+        try:
+            return getattr(self._feeder, name)(*args)
+        except FeederError as exc:
+            self._machine._feeder_fault(exc)
+            raise
+
+    def current_plate(self) -> int:
+        return self._call("current_plate")
+
+    def rotate(self) -> None:
+        self._call("rotate")
+
+    def open_now(self, plate: int) -> None:
+        self._call("open_now", plate)
+
+    def close(self) -> bool:
+        return self._call("close")
+
+    def manual_feed_active(self) -> bool:
+        return self._call("manual_feed_active")

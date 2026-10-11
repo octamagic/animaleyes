@@ -69,6 +69,12 @@ MAIN_EVENT_KINDS = (
     "manual_open_failed",
     "manual_close_failed",
     "manual_rotate_failed",
+    "power_cycle",
+    "power_cycle_failed",
+    "power_cycle_skipped",
+    "power_on",
+    "power_on_failed",
+    "manual_power_cycle",
 )
 
 
