@@ -101,7 +101,7 @@ def test_min_gap_blocks_a_second_open(h: Harness) -> None:
 
 def test_min_gap_applies_even_when_grrr_is_confirmed_in_watching(h: Harness) -> None:
     h.load_plates(1, 2)
-    h.store.set("last_open_at", h.clock.now.isoformat())
+    h.store.set("last_fed_at", h.clock.now.isoformat())
     confirm_grrr(h)
     assert h.state() == "WATCHING"
     assert h.feeder.opens == []
@@ -719,3 +719,99 @@ def test_a_new_window_forgets_which_bowls_were_tried(h: Harness) -> None:
     h.tick(motion=False)  # 22:00 is inside the window -> IDLE, with the slate wiped
     assert h.state() == "IDLE"
     assert h.machine.plates_tried() == []
+
+
+NONE = Verdict(animal="none", confidence=0.95, at_bowl=False, reason="empty room")
+
+
+def test_a_blank_frame_between_two_grrr_reads_does_not_reset_confirmation(h: Harness) -> None:
+    """With the camera tight on the feeder she drops out of frame between reads. Two confident
+    Grrr reads within CONFIRM_WINDOW_S open the lid even with 'none' in between."""
+    h.load_plates(1)
+    h.config.update({"CONFIRMATIONS_REQUIRED": 2})
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)  # one read
+    assert h.state() == "WATCHING"
+    h.llm.identify_result = NONE
+    h.run(seconds=6)  # two blank reads
+    assert h.feeder.opens == []
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)  # second confident read, 10 s after the first
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_unsure_between_grrr_reads_does_not_reset_either(h: Harness) -> None:
+    h.load_plates(1)
+    h.config.update({"CONFIRMATIONS_REQUIRED": 2})
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)
+    h.llm.identify_result = UNSURE
+    h.run(seconds=4)
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_another_animal_between_grrr_reads_resets_confirmation(h: Harness) -> None:
+    h.load_plates(1)
+    h.config.update({"CONFIRMATIONS_REQUIRED": 2})
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)
+    h.llm.identify_result = BOWIE
+    h.run(seconds=4)
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)  # only one Grrr read since Bowie: not enough
+    assert h.feeder.opens == []
+    h.run(seconds=4)
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_grrr_reads_older_than_the_window_do_not_count(h: Harness) -> None:
+    h.load_plates(1)
+    h.config.update({"CONFIRMATIONS_REQUIRED": 2, "CONFIRM_WINDOW_S": 30})
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)
+    h.llm.identify_result = NONE
+    h.run(seconds=40)  # the first read ages out
+    h.llm.identify_result = GRRR
+    h.run(seconds=4)
+    assert h.feeder.opens == []  # one fresh read only
+    h.run(seconds=4)
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_an_empty_session_skips_the_cooldown_so_the_next_bowl_can_be_tried(h: Harness) -> None:
+    """Last night: bowl 3 was empty, the swap to the next bowl was refused by the device, and the
+    machine sat in a 60-minute cooldown while she scratched at the lid. Nothing was served, so
+    MIN_GAP_MIN must not apply; the device gets FEED_RETRY_BACKOFF_S, then the next bowl."""
+    h.config.update({"VERIFY_FOOD": True, "CONFIRMATIONS_REQUIRED": 2})
+    h.llm.verify_result = NO_FOOD
+    h.feeder.fail_close = True  # the device refuses mid-swap, like motor error 2043
+    confirm_grrr(h)
+    assert h.feeder.opens == ["open:1"]  # nothing marked: the bowl under the lid
+    h.run(seconds=25)  # two empty reads -> swap -> refused
+    assert h.events("empty_no_food")
+    assert h.state() in ("IDLE", "WATCHING"), "no food went out, so no cooldown"
+    assert h.store.plates()[1] == "eaten"
+    assert h.machine.next_allowed_feed() is None
+
+    h.feeder.fail_close = False
+    confirm_grrr(h)
+    assert h.feeder.opens == ["open:1"], "backs off after the device refused"
+    assert h.events("grrr_blocked")
+    h.clock.advance(seconds=121)
+    confirm_grrr(h)
+    assert h.feeder.opens == ["open:1", "open:2"]  # the next untried bowl, this time with food?
+    h.llm.verify_result = HAS_FOOD
+    h.run(seconds=15)
+    assert h.state() == "FEEDING"
+    assert h.machine.next_allowed_feed() is not None  # now a real feed starts the gap
+
+
+def test_a_fed_session_still_cools_down(h: Harness) -> None:
+    h.load_plates(1, 2)
+    confirm_grrr(h)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=125)
+    assert h.state() == "COOLDOWN"
+    assert h.events("transition")[0].data["fed"] is True

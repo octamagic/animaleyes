@@ -94,6 +94,10 @@ class Machine:
         self.capture_gate = capture_gate
         self.capture_dir = capture_dir
         self.verdicts: deque[Verdict] = deque(maxlen=VERDICT_HISTORY)
+        # When each confident Grrr read happened. Confirmation counts these within
+        # CONFIRM_WINDOW_S; a "none"/"unsure" read in between is a bad frame, not evidence
+        # she left, so it neither counts nor resets. Any other animal resets.
+        self.grrr_seen: deque[datetime] = deque(maxlen=VERDICT_HISTORY)
         self.last_verdict: Verdict | FeedingVerdict | None = None
         self.last_verdict_at: datetime | None = None
         self.watch_verdicts: deque[Verdict] = deque(maxlen=2)
@@ -139,6 +143,7 @@ class Machine:
             # (and never re-verify/re-rotate on resume — just feed whatever is already served).
             self.store.set("state", State.FEEDING)
             self.store.set("grrr_last_seen_at", now.isoformat())
+            self._mark_fed(now)  # assume food went out: the gap must apply after a restart
             resumed = "resumed FEEDING after restart; lid assumed open"
         elif state == State.CLOSING:
             resumed = "resumed CLOSING after restart"
@@ -188,7 +193,7 @@ class Machine:
         # Dashboard marks count for the window they were made in, or while a bowl is still
         # marked loaded. Nothing marked = the human may have refilled without telling us.
         self.store.set("plates_marked", "1" if self.store.loaded_plates() else None)
-        self.verdicts.clear()
+        self._forget_verdicts()
         self._transition(State.IDLE, "active window started")
 
     def _tick_idle(self, now: datetime) -> None:
@@ -196,7 +201,7 @@ class Machine:
             self._transition(State.DONE, self._no_plates_reason())
             return
         if self._motion(now):
-            self.verdicts.clear()
+            self._forget_verdicts()
             self._transition(State.WATCHING, "motion detected", fraction=self.motion.last_fraction)
 
     def _tick_watching(self, now: datetime) -> None:
@@ -211,8 +216,9 @@ class Machine:
         self.last_verdict = verdict
         self.last_verdict_at = now
         self.verdicts.append(verdict)
+        self._note_grrr(now, verdict)
         self._check_veto(now)
-        if self._grrr_confirmed():
+        if self._grrr_confirmed(now):
             blocker = self._open_blocker(now)
             if blocker:
                 self._log_once(now, "grrr_blocked", blocker, VETO_REPEAT_S)
@@ -272,6 +278,7 @@ class Machine:
         if self.settings.VERIFY_FOOD:
             self._transition(State.VERIFYING, "lid open, verifying food", plate=plate)
         else:
+            self._mark_fed(now)
             self._transition(State.FEEDING, "lid open", plate=plate)
 
     def _tick_verifying(self, now: datetime) -> None:
@@ -303,6 +310,7 @@ class Machine:
 
         if verdict.bowl == "food":
             self.store.set("verify_empty_count", 0)
+            self._mark_fed(now)
             self._transition(State.FEEDING, f"food confirmed on plate {plate}")
             return
 
@@ -310,6 +318,7 @@ class Machine:
             self.store.set("verify_empty_count", 0)
             started = self._when("verify_started_at") or opened_at
             if now - started >= timedelta(seconds=self.settings.VERIFY_TIMEOUT_S):
+                self._mark_fed(now)
                 self._transition(State.FEEDING, "food unverified (timed out), feeding anyway")
             return
 
@@ -345,6 +354,9 @@ class Machine:
         try:
             new_plate = self._reserve_next_loaded(now)
         except FeederError as exc:
+            # The device refused mid-swap (motor error, timeout). Back off like a failed open so
+            # it isn't hammered, but don't treat this as a feed: nothing was served.
+            self.store.set("feed_failed_at", now.isoformat())
             event_id = self.store.add_event(
                 now, "empty_no_food", f"re-serve failed: {exc}", {"plate": plate}, frames
             )
@@ -435,11 +447,14 @@ class Machine:
         if plate:
             self.store.set_plate(plate, plate_status, now)
         session_s = int((now - opened_at).total_seconds())
+        last_fed = self._when("last_fed_at")
+        fed = bool(last_fed and last_fed >= opened_at)
         data = {
             "plate": plate,
             "bowl": bowl,
             "plate_status": plate_status,
             "session_s": session_s,
+            "fed": fed,
             "loaded_plates": self.store.loaded_plates(),
             "mode": "DRY_RUN" if self.settings.DRY_RUN else "LIVE",
             # False = the feeder said no lid was open, so nothing was sent. Usually it closed
@@ -459,12 +474,17 @@ class Machine:
                 event_id,
             )
         self.store.set("lid_actual_open", 0)
-        self.verdicts.clear()
+        self._forget_verdicts()
+        if not fed:
+            # Nothing was served (empty bowl, swap refused): the gap guards against a second
+            # helping, and there was no first. Let her try the next bowl as soon as she's back.
+            self._transition(State.IDLE, "lid closed, no food served: no cooldown", **data)
+            return
         self._transition(State.COOLDOWN, "lid closed", **data)
 
     def _tick_cooldown(self, now: datetime) -> None:
-        last_open = self._when("last_open_at")
-        if last_open and now - last_open < timedelta(minutes=self.settings.MIN_GAP_MIN):
+        last_fed = self._when("last_fed_at")
+        if last_fed and now - last_fed < timedelta(minutes=self.settings.MIN_GAP_MIN):
             return
         if self._candidate_plates():
             self._transition(State.IDLE, f"MIN_GAP_MIN ({self.settings.MIN_GAP_MIN}) elapsed")
@@ -516,20 +536,38 @@ class Machine:
     def _llm_due(self, now: datetime, interval_s: float) -> bool:
         return self.last_llm_at is None or now - self.last_llm_at >= timedelta(seconds=interval_s)
 
-    def _grrr_confirmed(self) -> bool:
-        needed = self.settings.CONFIRMATIONS_REQUIRED
-        recent = list(self.verdicts)[-needed:]
-        require_bowl = self.settings.OPEN_REQUIRES_AT_BOWL
-        return len(recent) >= needed and all(
-            v.is_grrr(self.settings.GRRR_MIN_CONF, require_bowl) for v in recent
-        )
+    def _note_grrr(self, now: datetime, verdict: Verdict) -> None:
+        """Feed one identify() result into the confirmation count."""
+        if verdict.is_grrr(self.settings.GRRR_MIN_CONF, self.settings.OPEN_REQUIRES_AT_BOWL):
+            self.grrr_seen.append(now)
+        elif verdict.animal not in ("grrr", "none", "unsure") or verdict.other_animals_present:
+            # A different animal seen (alone or beside her) contradicts the streak. A shaky
+            # Grrr read, nothing, or unsure is just an unhelpful frame: neither counts nor resets.
+            self.grrr_seen.clear()
+
+    def _grrr_confirmed(self, now: datetime) -> bool:
+        """CONFIRMATIONS_REQUIRED confident Grrr reads within CONFIRM_WINDOW_S. With the camera
+        tight on the feeder she bobs in and out of frame while she waits, so demanding the reads
+        be back to back used to take ten minutes of her scratching at the lid."""
+        window = timedelta(seconds=self.settings.CONFIRM_WINDOW_S)
+        recent = [t for t in self.grrr_seen if now - t <= window]
+        return len(recent) >= self.settings.CONFIRMATIONS_REQUIRED
+
+    def _forget_verdicts(self) -> None:
+        self.verdicts.clear()
+        self.grrr_seen.clear()
+
+    def _mark_fed(self, now: datetime) -> None:
+        """Food is (assumed) in front of her: this is what MIN_GAP_MIN counts from. An open that
+        served nothing (empty bowl, refused swap) does not move it."""
+        self.store.set("last_fed_at", now.isoformat())
 
     def _open_blocker(self, now: datetime) -> str | None:
         if not self._candidate_plates():
             return self._no_plates_reason()
-        last_open = self._when("last_open_at")
-        if last_open and now - last_open < timedelta(minutes=self.settings.MIN_GAP_MIN):
-            return f"last open {int((now - last_open).total_seconds() // 60)} min ago < MIN_GAP_MIN"
+        last_fed = self._when("last_fed_at")
+        if last_fed and now - last_fed < timedelta(minutes=self.settings.MIN_GAP_MIN):
+            return f"last fed {int((now - last_fed).total_seconds() // 60)} min ago < MIN_GAP_MIN"
         failed = self._when("feed_failed_at")
         if failed and now - failed < timedelta(seconds=self.settings.FEED_RETRY_BACKOFF_S):
             return f"feed failed {int((now - failed).total_seconds())}s ago < FEED_RETRY_BACKOFF_S"
@@ -886,7 +924,7 @@ class Machine:
         }
 
     def next_allowed_feed(self) -> datetime | None:
-        last_open = self._when("last_open_at")
-        if not last_open:
+        last_fed = self._when("last_fed_at")
+        if not last_fed:
             return None
-        return last_open + timedelta(minutes=self.settings.MIN_GAP_MIN)
+        return last_fed + timedelta(minutes=self.settings.MIN_GAP_MIN)
