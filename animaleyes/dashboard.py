@@ -75,6 +75,10 @@ MAIN_EVENT_KINDS = (
     "power_on",
     "power_on_failed",
     "manual_power_cycle",
+    "feeder_online",
+    "feeder_not_back",
+    "feed_given_up",
+    "retry_held",
 )
 
 

@@ -23,7 +23,7 @@ from typing import Any
 
 from .camera import Frame, FrameBuffer
 from .config import ConfigStore, Settings
-from .feeder import Feeder, FeederError, is_device_fault
+from .feeder import Feeder, FeederError, FeederHealth
 from .motion import MotionDetector
 from .notify import Notifier
 from .power import PowerError, PowerSwitch
@@ -40,6 +40,10 @@ VERDICT_HISTORY = 6
 # wait for the same animal twice in a row. Logging only — it never gates or triggers a feed.
 SIGHTING_MIN_CONF = 0.6
 NOT_AN_ANIMAL = ("grrr", "none", "unsure")
+# A failed-open retry episode is abandoned after this long (the dog has surely given up too).
+FEED_RETRY_TTL_MIN = 20
+# A non-Grrr verdict this fresh holds back an automatic retry of a confirmed feed.
+RECENT_VERDICT_S = 60
 # States where the machine already runs its own identification or the lid is open.
 WATCH_SKIP_STATES = ("WATCHING", "OPENING", "VERIFYING", "FEEDING", "CLOSING")
 
@@ -135,10 +139,13 @@ class Machine:
             self.clock(), "transition", reason, {"from": old, "to": new_state, **data}
         )
 
-    def _feeder(self) -> Feeder:
+    def _feeder(self, report_faults: bool = True) -> Feeder:
+        """The feeder to command. LIVE goes through a proxy that reports every error to
+        _feeder_fault (power cycle) and sends nothing while the plug is off. Read-only probes
+        that are expected to fail (the boot check, the lid poll) pass report_faults=False."""
         if self.settings.DRY_RUN:
             return self.dry_feeder
-        return _FaultWatch(self.real_feeder, self)  # type: ignore[return-value]
+        return _FaultWatch(self.real_feeder, self, report_faults)  # type: ignore[return-value]
 
     # feeder power -----------------------------------------------------
     def plug_is_off(self) -> bool:
@@ -146,22 +153,27 @@ class Machine:
         return bool(off and (on is None or on < off))
 
     def _feeder_fault(self, exc: FeederError) -> None:
-        """Called by the feeder proxy on every FeederError. A fault from the device itself gets
-        the plug pulled (immediately, as asked: nothing else recovers a stuck motor)."""
+        """Called by the feeder proxy on every FeederError from a live command. Any error pulls
+        the plug: motor fault 2043, response timeouts, replies that never came. In practice a
+        reboot is the only thing that has brought the feeder back, and a wasted reboot costs
+        nothing. An open attempt runs its own cycle inside its retry budget (_abort_open); all
+        other commands are capped to one cycle per POWER_CYCLE_MIN_GAP_MIN."""
         if self.power is None or not self.settings.POWER_CYCLE_ON_FAULT:
             return
-        if not is_device_fault(str(exc)):
-            return  # cloud, network or login trouble: a reboot won't help
+        if self.state == State.OPENING:
+            return
         self._power_cycle(self.clock(), f"feeder fault: {exc}")
 
-    def _power_cycle(self, now: datetime, reason: str, manual: bool = False) -> bool:
+    def _power_cycle(
+        self, now: datetime, reason: str, manual: bool = False, force: bool = False
+    ) -> bool:
         if self.power is None:
             return False
         if self.plug_is_off():
             return False  # already mid-cycle
         last = self._when("plug_cycled_at")
         gap = timedelta(minutes=self.settings.POWER_CYCLE_MIN_GAP_MIN)
-        if not manual and last and now - last < gap:
+        if not (manual or force) and last and now - last < gap:
             self._log_once(
                 now,
                 "power_cycle_skipped",
@@ -210,9 +222,76 @@ class Machine:
             self._log_once(now, "power_on_failed", str(exc), 60, notify=True, urgent=True)
             return
         self.store.set("plug_on_at", now.isoformat())
-        self.store.set("feed_failed_at", None)
+        self.store.set("feeder_ready_at", None)
+        self.store.set("feeder_probed_at", None)
         event_id = self.store.add_event(now, "power_on", "feeder power restored", {})
-        self._notify("feeder power restored; it should be back in a minute or two", event_id)
+        self._notify("feeder power restored; waiting for it to come back online", event_id)
+
+    def feeder_booting(self) -> bool:
+        """Power is back but the feeder has not yet been confirmed online."""
+        return (
+            bool(self._when("plug_on_at"))
+            and not self.plug_is_off()
+            and not self.store.get("feeder_ready_at")
+        )
+
+    def _tick_boot(self, now: datetime) -> None:
+        """After power comes back, don't trust a timer: ask the cloud every POWER_CYCLE_PROBE_S
+        until the feeder has checked in since the power-on and reports no fault. The probe is
+        read-only and expected to fail while the device boots, so its errors are not faults.
+        After POWER_CYCLE_BOOT_MAX_S we stop waiting: a cloud that never refreshes its view of
+        the device must not be able to block feeding all night."""
+        if self.power is None or not self.feeder_booting():
+            return
+        on_at = self._when("plug_on_at")
+        assert on_at is not None
+        if now - on_at < timedelta(seconds=self.settings.POWER_CYCLE_BOOT_S):
+            return
+        probed = self._when("feeder_probed_at")
+        if probed and now - probed < timedelta(seconds=self.settings.POWER_CYCLE_PROBE_S):
+            return
+        self.store.set("feeder_probed_at", now.isoformat())
+        waited = int((now - on_at).total_seconds())
+        try:
+            health = self._feeder(report_faults=False).health()
+        except FeederError as exc:
+            health, why = None, f"status unavailable: {exc}"
+        else:
+            why = self._not_back_reason(health, on_at)
+        if why is None:
+            self._feeder_ready(now, f"feeder back online after {waited}s", health)
+            return
+        if waited >= self.settings.POWER_CYCLE_BOOT_MAX_S:
+            event_id = self.store.add_event(
+                now, "feeder_not_back", f"{why} after {waited}s; proceeding anyway", {}
+            )
+            self._notify(
+                f"FEEDER NOT CONFIRMED BACK after {waited}s ({why}); trying commands anyway",
+                event_id,
+                urgent=True,
+            )
+            self._feeder_ready(now, f"not confirmed after {waited}s ({why}); proceeding", health)
+            return
+        self._log_once(now, "feeder_booting", f"{why} ({waited}s since power-on)", 60)
+
+    @staticmethod
+    def _not_back_reason(health: FeederHealth, on_at: datetime) -> str | None:
+        if not health.online:
+            return "cloud reports the feeder offline"
+        if health.error:
+            return f"feeder reports {health.error}"
+        if health.last_online_at and health.last_online_at < on_at:
+            return "feeder has not checked in since power-on"
+        return None
+
+    def _feeder_ready(self, now: datetime, reason: str, health: FeederHealth | None) -> None:
+        self.store.set("feeder_ready_at", now.isoformat())
+        self.store.set("feed_failed_at", None)  # a fresh feeder deserves a prompt retry
+        data: dict[str, Any] = {}
+        if health is not None:
+            data = {"online": health.online, "error": health.error, "state": health.running_state}
+        event_id = self.store.add_event(now, "feeder_online", reason, data)
+        self._notify(f"feeder ready: {reason}", event_id)
 
     # startup -----------------------------------------------------------
     def start(self) -> None:
@@ -242,6 +321,7 @@ class Machine:
         self._heartbeat(now)
         self._poll_lid(now)
         self._tick_power(now)
+        self._tick_boot(now)
         self._consume_dashboard_requests(now)
         if self.settings.CAPTURE_MODE:
             self._tick_capture(now)
@@ -254,6 +334,8 @@ class Machine:
             return
         if not self.settings.is_active_at(now.time()) and not lid_open:
             self._transition(State.OUTSIDE_WINDOW, "outside active window")
+            return
+        if self._tick_retry(now):
             return
 
         handler = {
@@ -319,16 +401,10 @@ class Machine:
             self._mark_tried(plate)  # persisted before the open, so a crash can't retry it
             feeder.open_now(plate)
         except FeederError as exc:
-            # Back off so a failing feeder isn't hammered every tick (which drains the device
-            # and spams the cloud). The dog's return after the window still re-triggers later.
-            self.store.set("feed_failed_at", now.isoformat())
-            event_id = self.store.add_event(
-                now, "feed_failed", str(exc), {"trigger": trigger, "mode": mode}, frames
-            )
-            self._notify(f"FEED FAILED ({mode}): {exc}", event_id, urgent=True)
-            self._transition(State.IDLE, "feed failed", error=str(exc))
+            self._abort_open(now, trigger, str(exc), frames, mode)
             return
         self.store.set("feed_failed_at", None)
+        self.store.set("feed_retry", None)
         self.store.set("lid_actual_open", 1)
         loaded = self.store.loaded_plates()
         self.store.set("feeding_plate", plate)
@@ -655,9 +731,11 @@ class Machine:
             return f"feed failed {int((now - failed).total_seconds())}s ago < FEED_RETRY_BACKOFF_S"
         if self.plug_is_off():
             return "feeder is power-cycling"
-        on_at = self._when("plug_on_at")
-        if on_at and now - on_at < timedelta(seconds=self.settings.POWER_CYCLE_BOOT_S):
-            return f"feeder rebooted {int((now - on_at).total_seconds())}s ago < POWER_CYCLE_BOOT_S"
+        if self.feeder_booting():
+            on_at = self._when("plug_on_at")
+            assert on_at is not None
+            waited = int((now - on_at).total_seconds())
+            return f"feeder rebooting, not confirmed online yet ({waited}s)"
         return None
 
     def _check_veto(self, now: datetime) -> None:
@@ -711,6 +789,141 @@ class Machine:
         tried = self.plates_tried()
         if plate not in tried:
             self.store.set("plates_tried", json.dumps(tried + [plate]))
+
+    def _unmark_tried(self, plate: int) -> None:
+        tried = self.plates_tried()
+        if plate in tried:
+            self.store.set("plates_tried", json.dumps([p for p in tried if p != plate]))
+
+    # failed opens and retries --------------------------------------------------
+    def _feed_retry(self) -> dict[str, Any] | None:
+        raw = self.store.get("feed_retry")
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    def _abort_open(
+        self, now: datetime, trigger: str, error: str, frames: list[str], mode: str
+    ) -> None:
+        """An open that served nothing. Undo what assumed it would (the plate is not "tried"),
+        then either arm a retry, power-cycling the feeder first when there is a plug, or give up
+        for this approach once FEED_RETRIES is spent. The retry needs no new confirmation: the
+        decision to feed was already made, minutes ago; _tick_retry only holds it back while
+        another animal is in view or the feeder is still coming back."""
+        plate = self.store.get_int("opening_plate", 0)
+        if plate:
+            self._unmark_tried(plate)
+        retry = self._feed_retry() or {
+            "attempts": 0,
+            "trigger": trigger,
+            "started_at": now.isoformat(),
+        }
+        attempt = int(retry["attempts"]) + 1
+        max_attempts = self.settings.FEED_RETRIES + 1
+        will_retry = attempt < max_attempts
+        self.store.set("feed_failed_at", now.isoformat())
+        cycled = False
+        if (
+            will_retry
+            and self.power is not None
+            and self.settings.POWER_CYCLE_ON_FAULT
+            and not self.settings.DRY_RUN
+        ):
+            cycled = self._power_cycle(
+                now, f"feed failed (attempt {attempt}/{max_attempts}): {error}", force=True
+            )
+            cycled = cycled or self.plug_is_off()  # a cycle begun by the fault itself
+        data = {
+            "trigger": trigger,
+            "mode": mode,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "will_retry": will_retry,
+            "power_cycled": cycled,
+        }
+        event_id = self.store.add_event(now, "feed_failed", error, data, frames)
+        if will_retry:
+            self.store.set(
+                "feed_retry",
+                json.dumps(
+                    {
+                        "attempts": attempt,
+                        "trigger": retry["trigger"],
+                        "started_at": retry["started_at"],
+                    }
+                ),
+            )
+            how = (
+                "power-cycling the feeder, then retrying once it is back online"
+                if cycled
+                else f"retrying in {self.settings.FEED_RETRY_BACKOFF_S}s"
+            )
+            self._notify(
+                f"FEED FAILED ({mode}, attempt {attempt}/{max_attempts}): {error}. {how}.",
+                event_id,
+                urgent=True,
+            )
+            self._transition(State.IDLE, "feed failed; will retry", error=error, attempt=attempt)
+            return
+        self.store.set("feed_retry", None)
+        given_up = self.store.add_event(
+            now, "feed_given_up", f"{attempt} attempts failed; last error: {error}", data
+        )
+        self._notify(
+            f"FEED FAILED ({mode}): {error}. GIVING UP after {attempt} attempts; check the feeder.",
+            given_up,
+            urgent=True,
+        )
+        self._transition(State.IDLE, "feed failed; giving up", error=error, attempt=attempt)
+
+    def _tick_retry(self, now: datetime) -> bool:
+        """Re-run a failed open as soon as the feeder is usable again. True if it acted."""
+        retry = self._feed_retry()
+        if not retry or self.state not in (State.IDLE, State.WATCHING):
+            return False
+        started = datetime.fromisoformat(retry["started_at"])
+        if now - started > timedelta(minutes=FEED_RETRY_TTL_MIN):
+            self.store.set("feed_retry", None)
+            event_id = self.store.add_event(
+                now,
+                "feed_given_up",
+                f"retry window ({FEED_RETRY_TTL_MIN} min) expired after "
+                f"{retry['attempts']} attempts",
+                retry,
+            )
+            self._notify("feed retry abandoned: the feeder stayed unusable too long", event_id)
+            return False
+        if self._open_blocker(now):
+            return False  # power cycling, booting, backing off: the status card says which
+        other = self._other_animal_now(now)
+        if other:
+            self._log_once(
+                now, "retry_held", f"{other} at the feeder; not retrying the feed", VETO_REPEAT_S
+            )
+            return False
+        attempt = int(retry["attempts"]) + 1
+        trigger = f"retry {attempt}/{self.settings.FEED_RETRIES + 1} after {retry['trigger']}"
+        self._transition(State.OPENING, trigger, attempt=attempt)
+        self._tick_opening(now, trigger=trigger)
+        return True
+
+    def _other_animal_now(self, now: datetime) -> str | None:
+        """A confident non-Grrr animal in the most recent verdict, if it is fresh."""
+        v = self.last_verdict
+        if v is None or self.last_verdict_at is None:
+            return None
+        if now - self.last_verdict_at > timedelta(seconds=RECENT_VERDICT_S):
+            return None
+        animal = getattr(v, "animal", "none")
+        if animal not in NOT_AN_ANIMAL and getattr(v, "confidence", 0) >= SIGHTING_MIN_CONF:
+            return str(animal)
+        for other in getattr(v, "other_animals_present", ()):
+            if other not in NOT_AN_ANIMAL:
+                return str(other)
+        return None
 
     def _candidate_plates(self) -> list[int]:
         """Bowls the machine may open now. Marked-loaded bowls win, exactly as marked. With nothing
@@ -909,10 +1122,47 @@ class Machine:
         if last and (now - last).total_seconds() < interval:
             return
         self.store.set("lid_checked_at", now.isoformat())
+        feeder = self._feeder(report_faults=False)
         try:
-            self.store.set("lid_actual_open", 1 if self._feeder().manual_feed_active() else 0)
+            self.store.set("lid_actual_open", 1 if feeder.manual_feed_active() else 0)
         except FeederError:
-            pass  # leave the last known value rather than guessing
+            return  # leave the last known value rather than guessing
+        if self.state in (State.VERIFYING, State.FEEDING):
+            self._check_lid_fault(now, feeder)
+
+    def _check_lid_fault(self, now: datetime, feeder: Feeder) -> None:
+        """The lid is supposed to be open. If the device itself keeps reporting a door/motor
+        error, the motor most likely never opened it and nothing is in front of her: treat it as
+        a failed open (undo, power cycle, retry) instead of sitting in FEEDING over a shut lid."""
+        try:
+            health = feeder.health()
+        except FeederError:
+            return
+        if not health.error:
+            self.store.set("lid_fault_count", 0)
+            return
+        # Two polls in a row, so one odd cloud reading can't reboot the feeder under her nose.
+        count = self.store.get_int("lid_fault_count") + 1
+        self.store.set("lid_fault_count", count)
+        if count < 2:
+            return
+        self.store.set("lid_fault_count", 0)
+        opened_at = self._when("opened_at")
+        last_fed = self._when("last_fed_at")
+        if opened_at and last_fed and last_fed >= opened_at:
+            self.store.set("last_fed_at", None)  # this open fed nothing; don't start a cooldown
+        self.store.set("lid_actual_open", 0)
+        self.store.set("opening_plate", self.store.get_int("feeding_plate", 0))
+        self._transition(
+            State.OPENING, "device reports a door fault after open", error=health.error
+        )
+        self._abort_open(
+            now,
+            "lid fault",
+            f"feeder reports {health.error} after the open command",
+            self._save_frames("lid_fault", self.frames.latest(1)),
+            "DRY_RUN" if self.settings.DRY_RUN else "LIVE",
+        )
 
     def _consume_dashboard_requests(self, now: datetime) -> None:
         if self.store.get("plates_updated"):
@@ -1014,6 +1264,8 @@ class Machine:
             "power_cycle_available": self.power is not None,
             "plug_off": self.plug_is_off(),
             "plug_cycled_at": self.store.get("plug_cycled_at"),
+            "feeder_booting": self.feeder_booting(),
+            "feed_retry": self._feed_retry(),
             "opened_at": self.store.get("opened_at") if self.state == State.FEEDING else None,
             "feeding_plate": self.store.get("feeding_plate")
             if self.state == State.FEEDING
@@ -1031,9 +1283,10 @@ class _FaultWatch:
     """The real feeder, with every FeederError reported to the machine before it propagates, and
     no commands sent at all while the plug is off (they'd only time out against a dead device)."""
 
-    def __init__(self, feeder: Feeder, machine: Machine):
+    def __init__(self, feeder: Feeder, machine: Machine, report: bool = True):
         self._feeder = feeder
         self._machine = machine
+        self._report = report
 
     def _call(self, name: str, *args):
         if self._machine.plug_is_off():
@@ -1041,8 +1294,12 @@ class _FaultWatch:
         try:
             return getattr(self._feeder, name)(*args)
         except FeederError as exc:
-            self._machine._feeder_fault(exc)
+            if self._report:
+                self._machine._feeder_fault(exc)
             raise
+
+    def health(self) -> FeederHealth:
+        return self._call("health")
 
     def current_plate(self) -> int:
         return self._call("current_plate")

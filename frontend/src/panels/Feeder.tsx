@@ -35,6 +35,14 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
           {s?.dry_run ? "dry run" : "live"}
         </span>
         {s?.plug_off && <span className="pill text-bad border-bad/40">power cycling</span>}
+        {!s?.plug_off && s?.feeder_booting && (
+          <span className="pill text-pearl border-pearl/40">feeder rebooting</span>
+        )}
+        {s?.feed_retry && (
+          <span className="pill text-pearl border-pearl/40">
+            feed retry pending ({s.feed_retry.attempts} failed)
+          </span>
+        )}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button variant="primary" onClick={feedNow}>Feed now</Button>

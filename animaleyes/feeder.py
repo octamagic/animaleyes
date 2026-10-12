@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import subprocess
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 log = logging.getLogger(__name__)
@@ -21,19 +23,45 @@ log = logging.getLogger(__name__)
 TOKEN_ERRORS = ("code 1009", "No cached token", "login` first", "Token expired")
 
 
-# Error texts that come from the feeder itself (motor stuck, radio not answering), as opposed to
-# the cloud, the network or our login. Seen so far: code=2043 "电机异常无法关门" (motor fault,
-# cannot close), code=2020 "Device response timeout". A power cycle fixes these; nothing else does.
-DEVICE_FAULT_SIGNS = ("code=20", "device response timeout", "电机", "motor")
-
-
-def is_device_fault(message: str) -> bool:
-    m = message.lower()
-    return any(sign.lower() in m for sign in DEVICE_FAULT_SIGNS)
-
-
 class FeederError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class FeederHealth:
+    """What the cloud knows about the device right now (from `status`). Read-only; used to tell
+    whether the feeder is really back after a power cycle and whether it is reporting a fault."""
+
+    online: bool
+    last_online_at: datetime | None  # when the cloud last heard from it (local, naive)
+    error: str | None  # device-reported fault (door/motor), None when it says NORMAL
+    running_state: str = ""
+    plate: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.online and self.error is None
+
+
+def health_from_status(info: dict) -> FeederHealth:
+    faults = []
+    if info.get("barnDoorError"):
+        faults.append("barnDoorError")
+    if info.get("errorState"):
+        faults.append("errorState")
+    door = info.get("doorErrorState")
+    if door and door != "NORMAL":
+        faults.append(f"doorErrorState={door}")
+    ms = info.get("lastOnlineTime")
+    last = datetime.fromtimestamp(ms / 1000) if isinstance(ms, (int, float)) and ms > 0 else None
+    plate = info.get("platePosition")
+    return FeederHealth(
+        online=bool(info.get("online")),
+        last_online_at=last,
+        error=", ".join(faults) or None,
+        running_state=str(info.get("runningState") or ""),
+        plate=int(plate) if plate in (1, 2, 3) else None,
+    )
 
 
 class Feeder(Protocol):
@@ -45,6 +73,7 @@ class Feeder(Protocol):
         ...
 
     def manual_feed_active(self) -> bool: ...
+    def health(self) -> FeederHealth: ...
 
 
 class PetlibroCli:
@@ -85,6 +114,9 @@ class PetlibroCli:
 
     def rotate(self) -> None:
         self._run("rotate", self.serial, "--no-dry-run")
+
+    def health(self) -> FeederHealth:
+        return health_from_status(json.loads(self._run("status", self.serial)))
 
     def manual_feed_active(self) -> bool:
         """True if the lid is currently open (an active manual feed exists).
@@ -154,3 +186,6 @@ class DryRunFeeder:
 
     def manual_feed_active(self) -> bool:
         return self._open
+
+    def health(self) -> FeederHealth:
+        return FeederHealth(online=True, last_online_at=None, error=None, plate=self.plate)

@@ -7,7 +7,7 @@ import pytest
 
 from animaleyes.camera import Frame, FrameBuffer
 from animaleyes.config import ConfigStore
-from animaleyes.feeder import FeederError
+from animaleyes.feeder import FeederError, FeederHealth
 from animaleyes.machine import Machine
 from animaleyes.motion import MotionDetector
 from animaleyes.notify import LogNotifier
@@ -81,6 +81,10 @@ class FakeFeeder:
         self.calls: list[str] = []
         self.fail_open = False
         self.open_error = "cloud said no"  # the FeederError text when fail_open is set
+        self.online = True  # what health() reports
+        self.device_error: str | None = None
+        self.last_online: datetime | None = None
+        self.health_calls = 0
         self.fail_close = False
         self.nothing_to_close = False
 
@@ -108,6 +112,15 @@ class FakeFeeder:
 
     def manual_feed_active(self) -> bool:
         return getattr(self, "_open", False)
+
+    def health(self) -> FeederHealth:
+        self.health_calls += 1
+        return FeederHealth(
+            online=self.online,
+            last_online_at=self.last_online,
+            error=self.device_error,
+            plate=self.plate,
+        )
 
     @property
     def opens(self) -> list[str]:
