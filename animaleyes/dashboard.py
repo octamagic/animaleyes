@@ -250,6 +250,12 @@ def create_app(
             "llm_model": settings.LLM_MODEL,
             "identifier": settings.IDENTIFIER,
             "ptz_available": ptz is not None,
+            # Feeder power (smart plug): drives the Power cycle button and the rebooting pills.
+            "power_cycle_available": machine.power is not None,
+            "plug_off": machine.plug_is_off(),
+            "plug_cycled_at": store.get("plug_cycled_at"),
+            "feeder_booting": machine.feeder_booting(),
+            "feed_retry": machine._feed_retry(),
             "last_verdict": verdict,
             "last_verdict_age_s": int((now - machine.last_verdict_at).total_seconds())
             if machine.last_verdict_at
