@@ -38,6 +38,8 @@ export type Status = {
   power_cycle_available: boolean;
   plug_off: boolean;
   plug_cycled_at: string | null;
+  feeder_booting: boolean;
+  feed_retry: { attempts: number; trigger: string; started_at: string } | null;
   last_verdict: Verdict | null;
   last_verdict_age_s: number | null;
   last_llm_at: string | null;

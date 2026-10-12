@@ -30,6 +30,9 @@ export const EVENTS: Record<string, [string, string]> = {
   power_cycle: ["🔌", "Feeder power cycled"], power_cycle_failed: ["⚠️", "Power cycle failed"],
   power_cycle_skipped: ["🔌", "Power cycle skipped (too soon)"], power_on: ["🔌", "Feeder power restored"],
   power_on_failed: ["⚠️", "Could not restore feeder power"], manual_power_cycle: ["🔌", "Power cycle (dry run)"],
+  feeder_booting: ["⏳", "Waiting for the feeder to come back"], feeder_online: ["✅", "Feeder back online"],
+  feeder_not_back: ["⚠️", "Feeder not confirmed back; trying anyway"],
+  feed_given_up: ["🛑", "Feed given up after retries"], retry_held: ["⏸️", "Retry held: another animal in view"],
   config: ["⚙️", "Settings changed"],
 };
 

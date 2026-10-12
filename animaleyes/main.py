@@ -202,7 +202,9 @@ def build(
         capture_dir=DATA_DIR / "training" / "unlabeled",
         healthcheck=_healthcheck(secrets.healthcheck_url),
         power=build_power_switch(
+            secrets.smart_plug_kind,
             secrets.smart_plug_host,
+            secrets.smart_plug_mac,
             secrets.smart_plug_user,
             secrets.smart_plug_password,
             secrets.smart_plug_off_cmd,

@@ -44,12 +44,20 @@ class Settings:
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
     CAMERA_FPS: int = 8  # frames/sec ffmpeg pulls; higher = smoother live view (restart to apply)
     FEED_RETRY_BACKOFF_S: int = 120  # after a failed open, wait before trying to open again
-    # Smart plug on the feeder's power (SMART_PLUG_* in .env). A device-side fault (motor stuck,
-    # no response) pulls the plug at once, off for POWER_CYCLE_OFF_S, then no feeder commands
-    # for POWER_CYCLE_BOOT_S while it boots. At most one automatic cycle per MIN_GAP.
+    # A failed open is retried this many more times (after a power cycle when a plug is set,
+    # else after FEED_RETRY_BACKOFF_S) before the machine gives up for that approach.
+    FEED_RETRIES: int = 3
+    # Smart plug on the feeder's power (SMART_PLUG_* in .env). Any error from a live feeder
+    # command pulls the plug at once, off for POWER_CYCLE_OFF_S. Power back on, the machine waits
+    # POWER_CYCLE_BOOT_S, then asks the cloud every POWER_CYCLE_PROBE_S until the feeder has
+    # checked in since the power-on and reports no fault; after POWER_CYCLE_BOOT_MAX_S it stops
+    # waiting and proceeds regardless. Cycles outside a feed attempt are capped to one per
+    # POWER_CYCLE_MIN_GAP_MIN; a feed attempt's cycles are capped by FEED_RETRIES instead.
     POWER_CYCLE_ON_FAULT: bool = True
     POWER_CYCLE_OFF_S: int = 10
-    POWER_CYCLE_BOOT_S: int = 90
+    POWER_CYCLE_BOOT_S: int = 45
+    POWER_CYCLE_PROBE_S: int = 15
+    POWER_CYCLE_BOOT_MAX_S: int = 300
     POWER_CYCLE_MIN_GAP_MIN: int = 10
     LID_POLL_S: int = 20  # how often to read the feeder's real lid state (0 = never)
     # Dashboard auth: "tailscale" = trust any device on the tailnet (no password), basic-auth
@@ -206,7 +214,9 @@ class Secrets:
     healthcheck_url: str = ""  # dead-man's-switch: pinged each heartbeat; alerts if pings stop
     # Smart plug on the feeder's power: a Kasa/Tapo plug's LAN address (+ Tapo credentials),
     # or a pair of shell commands for any other kind of plug.
+    smart_plug_kind: str = "shelly"  # shelly | kasa (or set the *_CMD pair for anything else)
     smart_plug_host: str = ""
+    smart_plug_mac: str = ""
     smart_plug_user: str = ""
     smart_plug_password: str = ""
     smart_plug_off_cmd: str = ""
@@ -235,7 +245,9 @@ class Secrets:
             pushover_token=env("PUSHOVER_TOKEN", ""),
             pushover_user=env("PUSHOVER_USER", ""),
             healthcheck_url=env("HEALTHCHECK_URL", ""),
+            smart_plug_kind=env("SMART_PLUG_KIND", "shelly"),
             smart_plug_host=env("SMART_PLUG_HOST", ""),
+            smart_plug_mac=env("SMART_PLUG_MAC", ""),
             smart_plug_user=env("SMART_PLUG_USER", ""),
             smart_plug_password=env("SMART_PLUG_PASSWORD", ""),
             smart_plug_off_cmd=env("SMART_PLUG_OFF_CMD", ""),
