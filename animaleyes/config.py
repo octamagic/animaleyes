@@ -35,6 +35,9 @@ class Settings:
     FEEDING_MAX_MIN: int = 15
     FEEDING_POLL_S: int = 20
     CONFIRMATIONS_REQUIRED: int = 3
+    # Confident Grrr reads count toward confirmation for this long; "none"/"unsure" reads in
+    # between don't reset the count (she's just out of frame for a moment), another animal does.
+    CONFIRM_WINDOW_S: int = 60
     GRRR_MIN_CONF: float = 0.65  # Grrr reads ~0.72-0.9 in IR; 0.8 was a touch high
     MOTION_PIXEL_FRACTION: float = 0.02
     MOTION_HOLD_S: int = 20
