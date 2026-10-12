@@ -161,6 +161,21 @@ def test_reference_capture_uses_the_latest_frame(h: Harness) -> None:
     assert len(saved) == 1
 
 
+def test_status_reports_feeder_power(h: Harness) -> None:
+    c = client(h)
+    s = c.get("/api/status").json()
+    assert s["power_cycle_available"] is False
+    assert s["plug_off"] is False and s["feeder_booting"] is False and s["feed_retry"] is None
+    h.power = object()  # any plug: the button and pills depend on these fields existing
+    h.machine = h.new_machine()
+    h.store.set("plug_off_at", h.clock.now.isoformat())
+    h.store.set("feed_retry", '{"attempts": 1, "trigger": "grrr confirmed", "started_at": "x"}')
+    s = client(h).get("/api/status").json()
+    assert s["power_cycle_available"] is True
+    assert s["plug_off"] is True
+    assert s["feed_retry"]["attempts"] == 1
+
+
 def test_status_reports_lid_and_current_plate(h: Harness) -> None:
     c = client(h)
     h.load_plates(1, 2)
