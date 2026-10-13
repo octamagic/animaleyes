@@ -416,6 +416,7 @@ class Machine:
         self.store.set("verify_rotations", 0)
         self.store.set("verify_empty_count", 0)
         self.store.set("verify_started_at", now.isoformat())
+        self.store.set("eaten_count", 0)
         self.last_feeding_verdict = None
         self.last_llm_at = now
         event_id = self.store.add_event(
@@ -552,6 +553,7 @@ class Machine:
         # last_open_at and feeds_this_window are deliberately left untouched.
         self.store.set("opened_at", now.isoformat())
         self.store.set("grrr_last_seen_at", now.isoformat())
+        self.store.set("eaten_count", 0)
         return plate
 
     def _tick_feeding(self, now: datetime) -> None:
@@ -587,6 +589,21 @@ class Machine:
                     frames=self._save_frames(f"{animal}_during_feed"),
                     notify=True,
                 )
+        self._check_eaten(now, verdict)
+
+    def _check_eaten(self, now: datetime, verdict: FeedingVerdict) -> None:
+        """She finished and walked off: close without waiting out LEAVE_TIMEOUT_S. Only a clear
+        "empty" with her away from the bowl counts; licking an empty bowl or an unsure read
+        resets the count, so a dark frame can't shut the lid on her mid-meal."""
+        if not self.settings.CLOSE_WHEN_EMPTY or verdict.grrr_at_bowl or verdict.bowl != "empty":
+            self.store.set("eaten_count", 0)
+            return
+        count = self.store.get_int("eaten_count") + 1
+        self.store.set("eaten_count", count)
+        if count < self.settings.EATEN_CONFIRMATIONS:
+            return
+        self._transition(State.CLOSING, f"bowl empty and grrr away ({count} reads)")
+        self._tick_closing(now)
 
     def _tick_closing(self, now: datetime) -> None:
         feeder = self._feeder()
