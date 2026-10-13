@@ -125,6 +125,52 @@ def test_leave_timeout_closes_and_presence_resets_it(h: Harness) -> None:
     assert h.store.plates()[1] == "loaded"
 
 
+def test_empty_bowl_and_away_closes_without_waiting_out_the_leave_timer(h: Harness) -> None:
+    h.config.update({"LEAVE_TIMEOUT_S": 600})
+    h.load_plates(1, 2)
+    confirm_grrr(h)
+    h.llm.feeding_result = EATING
+    h.run(seconds=60)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=45)  # two polls at FEEDING_POLL_S=20, far short of 600s
+    assert h.state() == "COOLDOWN"
+    assert h.feeder.calls[-1] == "close"
+    assert h.store.plates()[1] == "eaten"
+    assert any("bowl empty and grrr away" in e.reason for e in h.events("transition"))
+
+
+def test_licking_an_empty_bowl_keeps_the_lid_open(h: Harness) -> None:
+    h.config.update({"LEAVE_TIMEOUT_S": 600})
+    h.load_plates(1)
+    confirm_grrr(h)
+    h.llm.feeding_result = FeedingVerdict(grrr_at_bowl=True, bowl="empty", reason="licking")
+    h.run(seconds=120)
+    assert h.state() == "FEEDING"
+
+
+def test_one_empty_read_is_not_enough_and_unsure_resets_the_count(h: Harness) -> None:
+    h.config.update({"LEAVE_TIMEOUT_S": 600})
+    h.load_plates(1)
+    confirm_grrr(h)
+    for _ in range(3):
+        h.llm.feeding_result = GONE_EMPTY
+        h.run(seconds=20)
+        h.llm.feeding_result = FOOD_UNSURE
+        h.run(seconds=20)
+    assert h.state() == "FEEDING"
+
+
+def test_close_when_empty_off_waits_for_the_leave_timer(h: Harness) -> None:
+    h.config.update({"LEAVE_TIMEOUT_S": 600, "CLOSE_WHEN_EMPTY": False})
+    h.load_plates(1)
+    confirm_grrr(h)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=300)
+    assert h.state() == "FEEDING"
+    h.run(seconds=310)
+    assert h.state() == "COOLDOWN"
+
+
 def test_feeding_max_closes_even_while_eating(h: Harness) -> None:
     h.load_plates(1)
     confirm_grrr(h)
@@ -666,7 +712,8 @@ def test_session_close_records_when_no_command_was_sent(h: Harness) -> None:
 def test_eating_during_plate_verification_counts_as_presence(h: Harness) -> None:
     """Claude saying Grrr is at the bowl while the plate is being verified must hold the lid
     open: the leave timer used to run from the moment of opening regardless."""
-    h.config.update({"VERIFY_TIMEOUT_S": 60, "LEAVE_TIMEOUT_S": 90})
+    # The empty-bowl close would end this early; this test is about the leave timer.
+    h.config.update({"VERIFY_TIMEOUT_S": 60, "LEAVE_TIMEOUT_S": 90, "CLOSE_WHEN_EMPTY": False})
     h.llm.verify_result = FeedingVerdict(grrr_at_bowl=True, bowl="unsure", reason="dog hides bowl")
     _open_with_verify(h, 1)
     h.run(seconds=70)  # verification gives up after 60s -> FEEDING

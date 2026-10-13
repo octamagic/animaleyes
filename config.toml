@@ -5,8 +5,10 @@ ENABLED = true
 DRY_RUN = true                 # true: log the feed instead of opening the feeder. POC default.
 ACTIVE_START = "21:00"        # local time, may cross midnight
 ACTIVE_END = "06:00"
-MIN_GAP_MIN = 0               # min minutes between opens; 0 = reopen as soon as the dog returns (the 10-min absence spaces feeds)
-LEAVE_TIMEOUT_S = 600         # close after the dog has been gone this long (10 min)
+MIN_GAP_MIN = 0               # min minutes between opens; 0 = reopen as soon as the dog returns (the absence before close spaces feeds)
+LEAVE_TIMEOUT_S = 120         # close after the dog has been gone this long (2 min)
+CLOSE_WHEN_EMPTY = true       # close sooner: bowl empty and she's away from it ...
+EATEN_CONFIRMATIONS = 2       # ... this many polls in a row
 FEEDING_MAX_MIN = 15          # close no matter what after this long
 FEEDING_POLL_S = 20           # LLM cadence while the lid is open
 CONFIRMATIONS_REQUIRED = 3    # confident Grrr verdicts before opening ...

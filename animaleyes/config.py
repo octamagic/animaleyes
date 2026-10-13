@@ -32,6 +32,10 @@ class Settings:
     # the dashboard are still honoured exactly as marked.
     FEED_WITHOUT_LOADED_PLATES: bool = True
     LEAVE_TIMEOUT_S: int = 120
+    # Close as soon as the bowl reads empty and she's away from it, this many polls in a row
+    # (FEEDING_POLL_S apart), instead of waiting out LEAVE_TIMEOUT_S.
+    CLOSE_WHEN_EMPTY: bool = True
+    EATEN_CONFIRMATIONS: int = 2
     FEEDING_MAX_MIN: int = 15
     FEEDING_POLL_S: int = 20
     CONFIRMATIONS_REQUIRED: int = 3
