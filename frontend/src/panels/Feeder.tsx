@@ -15,6 +15,17 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
     toast(`${action === "power_cycle" ? "Power cycle" : action[0].toUpperCase() + action.slice(1)} requested`);
     pokeRefresh();
   }
+  async function resetCycle() {
+    if (
+      !confirm(
+        "Reset tonight's feeding cycle? Closes the lid if it is open, puts the bowls served tonight back to loaded, and clears the feed count and the minimum-gap timer. Use this when Grrr was fed before you were actually in bed.",
+      )
+    )
+      return;
+    await api.post("/api/reset-cycle");
+    toast("Cycle reset requested");
+    pokeRefresh();
+  }
   async function feedNow() {
     if (!confirm("Feed now? This opens the feeder, skipping identification.")) return;
     await api.post("/api/feed-now");
@@ -50,9 +61,12 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
         <Button onClick={() => act("close")}>Close</Button>
         <Button onClick={() => act("rotate")}>Rotate</Button>
         {s?.power_cycle_available && <Button onClick={() => act("power_cycle")}>Power cycle</Button>}
+        <Button variant="danger" onClick={resetCycle}>Reset cycle</Button>
       </div>
       <div className="text-muted text-xs mt-2.5">
         Buttons ask the feeder to act on its next check (a second or two). Nothing moves in dry‑run mode.
+        Reset cycle starts the night over: lid closed, tonight's bowls back to loaded, feed count and
+        minimum gap cleared. Untick a bowl afterwards if she really did finish it.
       </div>
     </Card>
   );

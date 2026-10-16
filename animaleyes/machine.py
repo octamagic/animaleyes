@@ -1204,6 +1204,10 @@ class Machine:
                 self.store.set(f"manual_{action}_requested", None)
                 self._manual_action(now, action)
 
+        if self.store.get("reset_cycle_requested"):
+            self.store.set("reset_cycle_requested", None)
+            self._reset_cycle(now)
+
         if self.store.get("feed_now_requested"):
             self.store.set("feed_now_requested", None)
             if self.state in (State.FEEDING, State.CLOSING, State.OPENING):
@@ -1263,6 +1267,72 @@ class Machine:
 
     def request_feed_now(self) -> None:
         self.store.set("feed_now_requested", 1)
+
+    def request_reset_cycle(self) -> None:
+        """Enqueue a reset of tonight's feeding cycle for the machine's next tick."""
+        self.store.set("reset_cycle_requested", 1)
+
+    def _reset_cycle(self, now: datetime) -> None:
+        """Start the night over, for the evening the window opened before anyone was in bed
+        and Grrr was fed early.
+
+        Closes the lid if it is open, puts every bowl served this window back to loaded (the
+        human is awake and can untick one she really finished), and forgets the feed count,
+        the MIN_GAP_MIN clock, the bowls tried, and any pending feed retry. Nothing about the
+        feeder's power state or the dashboard settings changes.
+        """
+        mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
+        lid_was_open = (
+            self.state in (State.OPENING, State.VERIFYING, State.FEEDING, State.CLOSING)
+            or self.store.get("lid_actual_open") == "1"
+        )
+        closed = False
+        close_error = None
+        if lid_was_open:
+            try:
+                closed = self._feeder().close() is not False
+            except FeederError as exc:
+                close_error = str(exc)
+            self.store.set("lid_actual_open", 0)
+            self.store.set("lid_manual_open", None)
+        restored = [p for p in self.plates_tried() if self.store.plates().get(p) == "eaten"]
+        for plate in restored:
+            self.store.set_plate(plate, "loaded", now)
+        for key in (
+            "plates_tried",
+            "last_fed_at",
+            "last_open_at",
+            "opened_at",
+            "feeding_plate",
+            "opening_plate",
+            "feed_retry",
+            "feed_failed_at",
+        ):
+            self.store.set(key, None)
+        for key in ("feeds_this_window", "eaten_count", "verify_empty_count", "verify_rotations"):
+            self.store.set(key, 0)
+        self._forget_verdicts()
+        self.last_feeding_verdict = None
+        data = {
+            "lid_was_open": lid_was_open,
+            "closed": closed,
+            "close_error": close_error,
+            "restored_plates": restored,
+            "loaded_plates": self.store.loaded_plates(),
+            "mode": mode,
+        }
+        event_id = self.store.add_event(
+            now, "cycle_reset", "reset from dashboard", data, self._save_frames("cycle_reset")
+        )
+        text = f"CYCLE RESET ({mode}): feed count and min gap cleared"
+        if restored:
+            text += f", bowls {restored} back to loaded"
+        if closed:
+            text += ", lid closed"
+        if close_error:
+            text += f". CLOSE FAILED: {close_error}"
+        self._notify(text, event_id, urgent=bool(close_error))
+        self._transition(State.IDLE, "cycle reset from dashboard", **data)
 
     def request_manual_action(self, action: str) -> None:
         """Enqueue a raw open/close/rotate for the machine to perform on its next tick."""

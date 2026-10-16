@@ -31,3 +31,4 @@ frontend/dist/
 
 # Trained classifier weights + ultralytics run dirs (large, rebuilt by tools/train_classifier.py)
 data/models/
+frontend/tsconfig.tsbuildinfo

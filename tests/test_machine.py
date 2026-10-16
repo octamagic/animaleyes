@@ -862,3 +862,73 @@ def test_a_fed_session_still_cools_down(h: Harness) -> None:
     h.run(seconds=125)
     assert h.state() == "COOLDOWN"
     assert h.events("transition")[0].data["fed"] is True
+
+
+def reset_landed_in_idle(h: Harness) -> bool:
+    """The reset itself goes to IDLE; motion still in the hold window may then start WATCHING."""
+    transitions = h.store.events(kinds=("transition",))
+    return any(
+        e.reason == "cycle reset from dashboard" and e.data["to"] == "IDLE" for e in transitions
+    ) and h.state() in ("IDLE", "WATCHING")
+
+
+def test_reset_cycle_while_feeding_closes_and_starts_the_night_over(h: Harness) -> None:
+    h.load_plates(1, 2)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    h.machine.request_reset_cycle()
+    h.tick(motion=False)
+    assert reset_landed_in_idle(h)
+    assert h.feeder.calls[-1] == "close"
+    assert h.store.plates()[1] == "loaded"
+    assert h.store.get_int("feeds_this_window") == 0
+    assert h.store.get("last_fed_at") is None
+    assert h.machine.plates_tried() == []
+    event = h.events("cycle_reset")[0]
+    # The lid was open, so plate 1 was still marked loaded; nothing needed restoring.
+    assert event.data["closed"] is True and event.data["restored_plates"] == []
+    assert any("CYCLE RESET" in s for s in h.notifier.sent)
+    # Nothing blocks a fresh feed, and it comes from plate 1 again.
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    assert h.feeder.opens == ["open:1", "open:1"]
+
+
+def test_reset_cycle_in_cooldown_restores_the_eaten_bowl_and_clears_the_gap(h: Harness) -> None:
+    h.load_plates(1)
+    confirm_grrr(h)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=125)
+    assert h.state() == "COOLDOWN"
+    assert h.store.plates()[1] == "eaten"
+    h.machine.request_reset_cycle()
+    h.tick(motion=False)
+    assert reset_landed_in_idle(h)
+    assert h.store.loaded_plates() == [1]
+    assert h.events("cycle_reset")[0].data["lid_was_open"] is False
+    assert h.feeder.calls.count("close") == 1  # the lid was already closed; no second close
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+
+
+def test_reset_cycle_leaves_a_verified_empty_bowl_empty(h: Harness) -> None:
+    h.load_plates(1)
+    h.store.set("plates_tried", "[1]")
+    h.store.set_plate(1, "empty", h.clock.now)
+    h.tick(motion=False)
+    h.machine.request_reset_cycle()
+    h.tick(motion=False)
+    assert h.store.plates()[1] == "empty"
+    assert h.events("cycle_reset")[0].data["restored_plates"] == []
+
+
+def test_reset_cycle_reports_a_failed_close(h: Harness) -> None:
+    h.load_plates(1)
+    confirm_grrr(h)
+    h.feeder.fail_close = True
+    h.machine.request_reset_cycle()
+    h.tick(motion=False)
+    assert reset_landed_in_idle(h)
+    event = h.events("cycle_reset")[0]
+    assert event.data["closed"] is False and "close failed" in event.data["close_error"]
+    assert any("CLOSE FAILED" in s for s in h.notifier.sent)
