@@ -79,6 +79,7 @@ MAIN_EVENT_KINDS = (
     "feeder_not_back",
     "feed_given_up",
     "retry_held",
+    "cycle_reset",
 )
 
 
@@ -350,6 +351,11 @@ def create_app(
     def feed_now() -> dict[str, str]:
         machine.request_feed_now()
         return {"ok": "feed requested; the state machine opens on its next tick"}
+
+    @app.post("/api/reset-cycle", dependencies=guarded)
+    def reset_cycle() -> dict[str, str]:
+        machine.request_reset_cycle()
+        return {"ok": "reset requested; the state machine applies it on its next tick"}
 
     @app.post("/api/feeder/{action}", dependencies=guarded)
     def feeder_action(action: str) -> dict[str, str]:

@@ -250,3 +250,16 @@ def test_photo_list_serve_retag_delete(h: Harness) -> None:
     assert c.get("/api/photos/training/bowie").json()["total"] == 0
     # unknown set/animal is rejected
     assert c.get("/api/photos/training/dragon").status_code == 404
+
+
+def test_reset_cycle_route_is_consumed_by_the_machine(h: Harness) -> None:
+    c = client(h)
+    h.tick(motion=False)
+    c.post("/api/feed-now")
+    h.tick(motion=False)
+    assert h.state() == "FEEDING"
+    assert c.post("/api/reset-cycle", auth=None).status_code == 401
+    assert c.post("/api/reset-cycle").status_code == 200
+    h.tick(motion=False)
+    assert h.state() == "IDLE"
+    assert "cycle_reset" in [e["kind"] for e in c.get("/api/events").json()]

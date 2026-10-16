@@ -108,8 +108,11 @@ Set `DASH_PUBLIC_URL` in `.env` to the public URL so Slack messages link straigh
 event page; the links carry no credentials. The page shows state, plates, feeds this
 window, next allowed feed, heartbeat and camera age, LLM calls and estimated cost today,
 the **live camera** (MJPEG at the ingest rate, ~2 fps, with the last verdict overlaid and a
-pause button for cellular), all controls, a confirm-gated **Feed now**, and the event log
-with frames and LLM JSON. The live view reuses the frames the app already decodes, so
+pause button for cellular), all controls, a confirm-gated **Feed now**, a confirm-gated
+**Reset cycle**, and the event log with frames and LLM JSON. **Reset cycle** is for the night
+the window opened before you were in bed and Grrr got fed early: it closes the lid if open,
+puts the bowls served tonight back to loaded, and clears the feed count and the minimum-gap
+timer so the night starts over. Untick a bowl afterwards if she really did finish it. The live view reuses the frames the app already decodes, so
 watching it opens no second connection to the camera and there's no need for the Kasa app.
 
 ## Ops
