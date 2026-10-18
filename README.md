@@ -115,6 +115,16 @@ puts the bowls served tonight back to loaded, and clears the feed count and the 
 timer so the night starts over. Untick a bowl afterwards if she really did finish it. The live view reuses the frames the app already decodes, so
 watching it opens no second connection to the camera and there's no need for the Kasa app.
 
+**Bedtime mode** (`FEED_START = "bedtime"`) is for nights when the first feed should help Grrr
+back to sleep, not start while she's still wound up. Feeding waits for a confirm-gated
+**We're in bed**, which also does a Reset cycle. After the press the first feed is held until
+she has gone `SETTLE_MIN` (60) minutes without a confident Grrr sighting and then comes back;
+every confident sighting before that restarts the hour, so circling the feeder after bed
+never opens it. Bowie, the cat and unsure frames don't restart it. Later feeds that night
+follow the usual rules. With no press there is no feeding, and Slack gets one reminder
+`BEDTIME_REMIND_MIN` into the window. The Feeder card shows *waiting for bed*,
+*settling 23/60 min*, or *settled*. `FEED_START = "schedule"` keeps the old behaviour.
+
 ## Ops
 
 - Slack gets every open/close/veto/feed_failed/none-left/startup/camera event and a quiet

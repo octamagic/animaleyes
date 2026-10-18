@@ -17,6 +17,7 @@ import tomli_w
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(os.environ.get("ANIMALEYES_CONFIG", "config.toml"))
+FEED_STARTS = ("schedule", "bedtime")
 
 
 @dataclass
@@ -26,6 +27,16 @@ class Settings:
     ACTIVE_START: str = "21:00"
     ACTIVE_END: str = "06:00"
     MIN_GAP_MIN: int = 60
+    # When the night's feeding may start. "schedule": any time in the active window. "bedtime":
+    # only after "We're in bed" is pressed on the dashboard, and the first feed after that waits
+    # until Grrr has gone SETTLE_MIN without a confident sighting (asleep) and then comes back.
+    # Circling the feeder right after bed keeps restarting that clock. Later feeds that night
+    # follow the usual rules.
+    FEED_START: str = "schedule"
+    SETTLE_MIN: int = 60
+    # Bedtime mode: Slack nudge once the window has been open this long with no "We're in bed"
+    # (0 = never). Without the press nothing is fed that night.
+    BEDTIME_REMIND_MIN: int = 150
     # If nobody marked a bowl as loaded for this window, still feed: when Grrr is confirmed,
     # open whatever bowl is under the lid, check it for food (VERIFY_FOOD), and move on to the
     # next untried bowl if it's empty, until every bowl has been tried once. Bowls marked from
@@ -160,6 +171,8 @@ def coerce(settings: Settings, key: str, raw: object) -> object:
     value = str(raw)
     if key in ("ACTIVE_START", "ACTIVE_END"):
         parse_hhmm(value)  # validate
+    if key == "FEED_START" and value not in FEED_STARTS:
+        raise ValueError(f"FEED_START must be one of {FEED_STARTS}")
     return value
 
 

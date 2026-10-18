@@ -263,3 +263,22 @@ def test_reset_cycle_route_is_consumed_by_the_machine(h: Harness) -> None:
     h.tick(motion=False)
     assert h.state() == "IDLE"
     assert "cycle_reset" in [e["kind"] for e in c.get("/api/events").json()]
+
+
+def test_bedtime_route_starts_settling_and_status_shows_it(h: Harness) -> None:
+    c = client(h)
+    h.config.update({"FEED_START": "bedtime"})
+    h.tick(motion=False)
+    assert c.get("/api/status").json()["settle"]["bedtime_at"] is None
+    assert c.post("/api/bedtime", auth=None).status_code == 401
+    assert c.post("/api/bedtime").status_code == 200
+    h.tick(motion=False)
+    settle = c.get("/api/status").json()["settle"]
+    assert settle["bedtime_at"] and settle["settling"] and settle["settle_min"] == 60
+    assert "bedtime" in [e["kind"] for e in c.get("/api/events").json()]
+
+
+def test_feed_start_rejects_unknown_modes(h: Harness) -> None:
+    c = client(h)
+    assert c.post("/api/config", json={"FEED_START": "whenever"}).status_code == 400
+    assert c.post("/api/config", json={"FEED_START": "bedtime"}).status_code == 200

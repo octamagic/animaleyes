@@ -44,6 +44,8 @@ NOT_AN_ANIMAL = ("grrr", "none", "unsure")
 FEED_RETRY_TTL_MIN = 20
 # A non-Grrr verdict this fresh holds back an automatic retry of a confirmed feed.
 RECENT_VERDICT_S = 60
+# A "We're in bed" press arms that night only; last night's press never arms tonight.
+BEDTIME_TTL_H = 12
 # States where the machine already runs its own identification or the lid is open.
 WATCH_SKIP_STATES = ("WATCHING", "OPENING", "VERIFYING", "FEEDING", "CLOSING")
 
@@ -335,6 +337,7 @@ class Machine:
         if not self.settings.is_active_at(now.time()) and not lid_open:
             self._transition(State.OUTSIDE_WINDOW, "outside active window")
             return
+        self._remind_bedtime(now)
         if self._tick_retry(now):
             return
 
@@ -357,6 +360,8 @@ class Machine:
         # Dashboard marks count for the window they were made in, or while a bowl is still
         # marked loaded. Nothing marked = the human may have refilled without telling us.
         self.store.set("plates_marked", "1" if self.store.loaded_plates() else None)
+        self.store.set("window_started_at", now.isoformat())
+        self.store.set("bedtime_reminded", None)
         self._forget_verdicts()
         self._transition(State.IDLE, "active window started")
 
@@ -713,6 +718,7 @@ class Machine:
 
     def _note_grrr(self, now: datetime, verdict: Verdict) -> None:
         """Feed one identify() result into the confirmation count."""
+        self._note_settling(now, verdict)
         if verdict.is_grrr(self.settings.GRRR_MIN_CONF, self.settings.OPEN_REQUIRES_AT_BOWL):
             self.grrr_seen.append(now)
         elif verdict.animal not in ("grrr", "none", "unsure") or verdict.other_animals_present:
@@ -740,6 +746,9 @@ class Machine:
     def _open_blocker(self, now: datetime) -> str | None:
         if not self._candidate_plates():
             return self._no_plates_reason()
+        settling = self._settle_blocker(now)
+        if settling:
+            return settling
         last_fed = self._when("last_fed_at")
         if last_fed and now - last_fed < timedelta(minutes=self.settings.MIN_GAP_MIN):
             return f"last fed {int((now - last_fed).total_seconds() // 60)} min ago < MIN_GAP_MIN"
@@ -754,6 +763,97 @@ class Machine:
             waited = int((now - on_at).total_seconds())
             return f"feeder rebooting, not confirmed online yet ({waited}s)"
         return None
+
+    def _bedtime(self, now: datetime) -> datetime | None:
+        """Tonight's "We're in bed" press, if there is one."""
+        at = self._when("bedtime_at")
+        return at if at and now - at < timedelta(hours=BEDTIME_TTL_H) else None
+
+    def _settling(self, now: datetime) -> datetime | None:
+        """Bedtime mode, after the press, before she has settled and before the first feed:
+        returns the bedtime the first feed is waiting on, else None."""
+        if self.settings.FEED_START != "bedtime" or self.store.get("settled_at"):
+            return None
+        bedtime = self._bedtime(now)
+        last_fed = self._when("last_fed_at")
+        if bedtime is None or (last_fed and last_fed >= bedtime):
+            return None
+        return bedtime
+
+    def _quiet_since(self, bedtime: datetime) -> datetime:
+        seen = self._when("grrr_seen_at")
+        return max(bedtime, seen) if seen else bedtime
+
+    def _note_settling(self, now: datetime, verdict: Verdict) -> None:
+        """Bedtime mode: a confident Grrr sighting after SETTLE_MIN unseen means she slept and
+        came back, so the first feed may go ahead; one sooner restarts the clock. Other animals,
+        unsure and shaky reads don't count either way."""
+        if not verdict.is_grrr(self.settings.GRRR_MIN_CONF, False):
+            return
+        bedtime = self._settling(now)
+        if bedtime is None:
+            return
+        quiet_since = self._quiet_since(bedtime)
+        quiet_min = int((now - quiet_since).total_seconds() // 60)
+        data = {"bedtime_at": bedtime.isoformat(), "quiet_since": quiet_since.isoformat()}
+        if now - quiet_since >= timedelta(minutes=self.settings.SETTLE_MIN):
+            self.store.set("settled_at", now.isoformat())
+            self.store.add_event(
+                now, "settled", f"grrr back after {quiet_min} min unseen: first feed allowed", data
+            )
+            return
+        self.store.set("grrr_seen_at", now.isoformat())
+        self._log_once(
+            now,
+            "settle_restart",
+            f"grrr seen {quiet_min} min into settling; {self.settings.SETTLE_MIN} min starts over",
+            VETO_REPEAT_S,
+            data=data,
+        )
+
+    def _settle_blocker(self, now: datetime) -> str | None:
+        if self.settings.FEED_START != "bedtime":
+            return None
+        if self._bedtime(now) is None:
+            return 'bedtime mode: waiting for "We\'re in bed"'
+        if self._settling(now) is None:
+            return None
+        return f"settling: grrr not yet unseen for {self.settings.SETTLE_MIN} min since bed"
+
+    def _remind_bedtime(self, now: datetime) -> None:
+        remind_min = self.settings.BEDTIME_REMIND_MIN
+        if self.settings.FEED_START != "bedtime" or remind_min <= 0:
+            return
+        if self._bedtime(now) or self.store.get("bedtime_reminded"):
+            return
+        started = self._when("window_started_at")
+        if not started or now - started < timedelta(minutes=remind_min):
+            return
+        self.store.set("bedtime_reminded", 1)
+        event_id = self.store.add_event(
+            now, "bedtime_reminder", f'no "We\'re in bed" {remind_min} min into the window'
+        )
+        self._notify(
+            'Nobody pressed "We\'re in bed" yet: no feeding tonight until someone does.',
+            event_id,
+        )
+
+    def settle_status(self, now: datetime) -> dict[str, Any] | None:
+        """Bedtime mode at a glance, for the dashboard."""
+        if self.settings.FEED_START != "bedtime":
+            return None
+        bedtime = self._bedtime(now)
+        settling = self._settling(now)
+        return {
+            "bedtime_at": bedtime.isoformat(timespec="seconds") if bedtime else None,
+            "settling": settling is not None,
+            "settle_min": self.settings.SETTLE_MIN,
+            "quiet_s": int((now - self._quiet_since(settling)).total_seconds())
+            if settling
+            else None,
+            "grrr_seen_at": self.store.get("grrr_seen_at") if settling else None,
+            "settled_at": self.store.get("settled_at") if bedtime else None,
+        }
 
     def _check_veto(self, now: datetime) -> None:
         self._log_sightings(now, "veto", list(self.verdicts)[-2:])
@@ -1030,6 +1130,7 @@ class Machine:
         self.last_verdict = verdict
         self.last_verdict_at = now
         self.watch_verdicts.append(verdict)
+        self._note_settling(now, verdict)
         self._log_sightings(
             now, "sighting", list(self.watch_verdicts), frames=frames, include_target=True
         )
@@ -1208,6 +1309,10 @@ class Machine:
             self.store.set("reset_cycle_requested", None)
             self._reset_cycle(now)
 
+        if self.store.get("bedtime_requested"):
+            self.store.set("bedtime_requested", None)
+            self._start_bedtime(now)
+
         if self.store.get("feed_now_requested"):
             self.store.set("feed_now_requested", None)
             if self.state in (State.FEEDING, State.CLOSING, State.OPENING):
@@ -1272,7 +1377,32 @@ class Machine:
         """Enqueue a reset of tonight's feeding cycle for the machine's next tick."""
         self.store.set("reset_cycle_requested", 1)
 
-    def _reset_cycle(self, now: datetime) -> None:
+    def request_bedtime(self) -> None:
+        """Enqueue "We're in bed" for the machine's next tick."""
+        self.store.set("bedtime_requested", 1)
+
+    def _start_bedtime(self, now: datetime) -> None:
+        """Everyone's in bed: start settling (bedtime mode) and start the night over."""
+        for key in ("settled_at", "grrr_seen_at"):
+            self.store.set(key, None)
+        self.store.set("bedtime_at", now.isoformat())
+        mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
+        if self.settings.FEED_START == "bedtime":
+            headline = (
+                f"IN BED ({mode}): first feed waits until Grrr has been unseen "
+                f"{self.settings.SETTLE_MIN} min; feed count and min gap cleared"
+            )
+        else:
+            headline = f"IN BED ({mode}): feed count and min gap cleared (schedule mode, no wait)"
+        self._reset_cycle(now, kind="bedtime", reason="in bed from dashboard", headline=headline)
+
+    def _reset_cycle(
+        self,
+        now: datetime,
+        kind: str = "cycle_reset",
+        reason: str = "cycle reset from dashboard",
+        headline: str = "",
+    ) -> None:
         """Start the night over, for the evening the window opened before anyone was in bed
         and Grrr was fed early.
 
@@ -1321,10 +1451,8 @@ class Machine:
             "loaded_plates": self.store.loaded_plates(),
             "mode": mode,
         }
-        event_id = self.store.add_event(
-            now, "cycle_reset", "reset from dashboard", data, self._save_frames("cycle_reset")
-        )
-        text = f"CYCLE RESET ({mode}): feed count and min gap cleared"
+        event_id = self.store.add_event(now, kind, reason, data, self._save_frames(kind))
+        text = headline or f"CYCLE RESET ({mode}): feed count and min gap cleared"
         if restored:
             text += f", bowls {restored} back to loaded"
         if closed:
@@ -1332,7 +1460,7 @@ class Machine:
         if close_error:
             text += f". CLOSE FAILED: {close_error}"
         self._notify(text, event_id, urgent=bool(close_error))
-        self._transition(State.IDLE, "cycle reset from dashboard", **data)
+        self._transition(State.IDLE, reason, **data)
 
     def request_manual_action(self, action: str) -> None:
         """Enqueue a raw open/close/rotate for the machine to perform on its next tick."""

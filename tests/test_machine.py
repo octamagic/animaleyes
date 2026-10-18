@@ -932,3 +932,172 @@ def test_reset_cycle_reports_a_failed_close(h: Harness) -> None:
     event = h.events("cycle_reset")[0]
     assert event.data["closed"] is False and "close failed" in event.data["close_error"]
     assert any("CLOSE FAILED" in s for s in h.notifier.sent)
+
+
+def bedtime_mode(h: Harness, settle_min: int = 60) -> None:
+    h.config.update({"FEED_START": "bedtime", "SETTLE_MIN": settle_min})
+
+
+def in_bed(h: Harness) -> None:
+    h.machine.request_bedtime()
+    h.tick(motion=False)
+
+
+def away(h: Harness, minutes: float) -> None:
+    """She's asleep: no motion, nothing seen, for this long."""
+    h.llm.identify_result = UNSURE
+    h.tick(motion=False, seconds=minutes * 60)
+
+
+def test_bedtime_mode_never_feeds_before_we_are_in_bed(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert h.state() == "WATCHING"
+    assert h.feeder.opens == []
+    assert "We're in bed" in h.events("grrr_blocked")[0].reason
+
+
+def test_in_bed_then_she_sleeps_an_hour_and_comes_back_is_fed(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    in_bed(h)
+    assert h.events("bedtime")
+    assert any("IN BED" in s for s in h.notifier.sent)
+    away(h, 61)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    assert h.feeder.opens == ["open:1"]
+    assert h.events("settled")
+
+
+def test_circling_after_bed_keeps_restarting_the_hour(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    in_bed(h)
+    # She obsesses over the feeder for two hours, never gone longer than 40 min at a time.
+    for _ in range(4):
+        confirm_grrr(h)
+        assert h.feeder.opens == []
+        away(h, 40)
+    assert h.events("settle_restart")
+    assert "settling" in h.events("grrr_blocked")[0].reason
+    # Finally asleep for an hour; when she wakes and comes back she's fed.
+    away(h, 25)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+
+
+def test_settling_counts_from_her_last_sighting_not_from_bed(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    in_bed(h)
+    away(h, 50)
+    confirm_grrr(h)  # 50 min after bed: too soon, restarts the hour
+    away(h, 30)
+    confirm_grrr(h)  # 80 min after bed, but only 30 since she was last seen
+    assert h.feeder.opens == []
+
+
+def test_other_animals_and_unsure_reads_do_not_restart_settling(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    in_bed(h)
+    h.llm.identify_result = BOWIE
+    h.run(seconds=12)
+    h.llm.identify_result = UNSURE
+    h.run(seconds=12)
+    h.llm.identify_result = Verdict(animal="grrr", confidence=0.3, at_bowl=True, reason="shaky")
+    h.run(seconds=12)
+    assert h.store.get("grrr_seen_at") is None
+    away(h, 60)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+
+
+def test_only_the_first_feed_after_bed_waits_to_settle(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1, 2)
+    in_bed(h)
+    away(h, 61)
+    confirm_grrr(h)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=125)
+    assert h.state() == "COOLDOWN"
+    # Back soon after: the usual rules apply, no second settling.
+    h.config.update({"MIN_GAP_MIN": 0})
+    h.tick(motion=False)
+    confirm_grrr(h)
+    assert h.feeder.opens == ["open:1", "open:2"]
+
+
+def test_in_bed_resets_the_cycle(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    h.machine.request_feed_now()
+    h.tick(motion=False)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=125, motion=False)
+    assert h.store.get_int("feeds_this_window") == 1
+    in_bed(h)
+    assert h.store.get_int("feeds_this_window") == 0
+    assert h.store.get("last_fed_at") is None
+    assert h.store.loaded_plates() == [1]
+    # The early feed doesn't count as the first feed after bed: she still has to settle.
+    confirm_grrr(h)
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_settling_survives_a_restart(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    in_bed(h)
+    away(h, 30)
+    confirm_grrr(h)  # restarts the hour
+    h.machine = h.new_machine()
+    h.machine.start()
+    away(h, 30)
+    confirm_grrr(h)
+    assert h.feeder.opens == [], "a restart must not forget she was just seen"
+
+
+def test_last_nights_bed_press_does_not_arm_tonight(h: Harness) -> None:
+    bedtime_mode(h)
+    h.load_plates(1)
+    in_bed(h)
+    h.tick(motion=False, seconds=23 * 3600)  # 21:00 the next evening
+    confirm_grrr(h)
+    assert h.feeder.opens == []
+    assert "We're in bed" in h.events("grrr_blocked")[-1].reason
+
+
+def test_schedule_mode_ignores_settling(h: Harness) -> None:
+    h.load_plates(1)
+    in_bed(h)  # still resets the cycle, but nothing waits
+    assert any("schedule mode" in s for s in h.notifier.sent)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+
+
+def test_bedtime_reminder_once_when_nobody_pressed_it(tmp_path) -> None:
+    h = Harness(tmp_path, start=datetime(2026, 9, 24, 20, 59))
+    bedtime_mode(h)
+    h.config.update({"BEDTIME_REMIND_MIN": 150})
+    h.tick(motion=False)
+    h.tick(motion=False, seconds=60)  # 21:00, window opens
+    h.tick(motion=False, seconds=149 * 60)
+    assert not h.events("bedtime_reminder")
+    h.tick(motion=False, seconds=120)
+    h.tick(motion=False, seconds=600)
+    assert len(h.events("bedtime_reminder")) == 1
+    assert any("We're in bed" in s for s in h.notifier.sent)
+
+
+def test_no_bedtime_reminder_once_we_are_in_bed(tmp_path) -> None:
+    h = Harness(tmp_path, start=datetime(2026, 9, 24, 20, 59))
+    bedtime_mode(h)
+    h.tick(motion=False)
+    h.tick(motion=False, seconds=60)
+    in_bed(h)
+    h.tick(motion=False, seconds=4 * 3600)
+    assert not h.events("bedtime_reminder")
