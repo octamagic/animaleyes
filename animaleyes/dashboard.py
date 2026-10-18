@@ -80,6 +80,10 @@ MAIN_EVENT_KINDS = (
     "feed_given_up",
     "retry_held",
     "cycle_reset",
+    "bedtime",
+    "bedtime_reminder",
+    "settled",
+    "settle_restart",
 )
 
 
@@ -271,6 +275,8 @@ def create_app(
             "personas": [p.to_dict() for p in personas.load()] if personas is not None else [],
             "capture_mode": settings.CAPTURE_MODE,
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
+            "feed_start": settings.FEED_START,
+            "settle": machine.settle_status(now),
         }
 
     @app.get("/api/config", dependencies=guarded)
@@ -356,6 +362,11 @@ def create_app(
     def reset_cycle() -> dict[str, str]:
         machine.request_reset_cycle()
         return {"ok": "reset requested; the state machine applies it on its next tick"}
+
+    @app.post("/api/bedtime", dependencies=guarded)
+    def bedtime() -> dict[str, str]:
+        machine.request_bedtime()
+        return {"ok": "bedtime requested; the state machine applies it on its next tick"}
 
     @app.post("/api/feeder/{action}", dependencies=guarded)
     def feeder_action(action: str) -> dict[str, str]:

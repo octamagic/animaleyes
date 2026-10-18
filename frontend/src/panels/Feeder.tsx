@@ -26,6 +26,13 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
     toast("Cycle reset requested");
     pokeRefresh();
   }
+  async function inBed() {
+    const wait = s?.feed_start === "bedtime" ? ` The first feed waits until Grrr has been unseen for ${s?.settle?.settle_min ?? 60} min.` : "";
+    if (!confirm(`We're in bed? This also resets tonight's cycle (lid closed, bowls back to loaded, feed count and minimum gap cleared).${wait}`)) return;
+    await api.post("/api/bedtime");
+    toast("Good night");
+    pokeRefresh();
+  }
   async function feedNow() {
     if (!confirm("Feed now? This opens the feeder, skipping identification.")) return;
     await api.post("/api/feed-now");
@@ -34,6 +41,7 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
   }
 
   const feeds = s?.feeds_this_window ?? 0;
+  const settle = s?.settle;
   return (
     <Card title="Feeder">
       <div className="flex flex-wrap gap-2 mb-3">
@@ -49,6 +57,14 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
         {!s?.plug_off && s?.feeder_booting && (
           <span className="pill text-pearl border-pearl/40">feeder rebooting</span>
         )}
+        {settle && !settle.bedtime_at && <span className="pill text-pearl border-pearl/40">waiting for bed</span>}
+        {settle?.settling && (
+          <span className="pill text-pearl border-pearl/40">
+            settling {Math.floor((settle.quiet_s ?? 0) / 60)}/{settle.settle_min} min
+            {settle.grrr_seen_at && ` · seen ${settle.grrr_seen_at.slice(11, 16)}`}
+          </span>
+        )}
+        {settle?.settled_at && <span className="pill text-sage">settled {settle.settled_at.slice(11, 16)}</span>}
         {s?.feed_retry && (
           <span className="pill text-pearl border-pearl/40">
             feed retry pending ({s.feed_retry.attempts} failed)
@@ -56,6 +72,7 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
         )}
       </div>
       <div className="flex flex-wrap gap-2">
+        <Button variant="primary" onClick={inBed}>We're in bed</Button>
         <Button variant="primary" onClick={feedNow}>Feed now</Button>
         <Button onClick={() => act("open")}>Open</Button>
         <Button onClick={() => act("close")}>Close</Button>
@@ -66,7 +83,8 @@ export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }
       <div className="text-muted text-xs mt-2.5">
         Buttons ask the feeder to act on its next check (a second or two). Nothing moves in dry‑run mode.
         Reset cycle starts the night over: lid closed, tonight's bowls back to loaded, feed count and
-        minimum gap cleared. Untick a bowl afterwards if she really did finish it.
+        minimum gap cleared. Untick a bowl afterwards if she really did finish it. We're in bed does the
+        same reset and, in bedtime mode, holds the first feed until Grrr has gone to sleep and come back.
       </div>
     </Card>
   );

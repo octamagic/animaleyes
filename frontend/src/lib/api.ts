@@ -48,6 +48,17 @@ export type Status = {
   personas: Persona[];
   capture_mode: boolean;
   feeding_since: string | null;
+  feed_start: string;
+  settle: Settle | null;
+};
+
+export type Settle = {
+  bedtime_at: string | null;
+  settling: boolean;
+  settle_min: number;
+  quiet_s: number | null;
+  grrr_seen_at: string | null;
+  settled_at: string | null;
 };
 
 export type Persona = {
