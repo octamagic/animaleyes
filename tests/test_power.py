@@ -13,7 +13,7 @@ import pytest
 
 from animaleyes.feeder import FeederError, health_from_status
 from animaleyes.power import CommandPlug, PowerError, ShellyPlug, build_power_switch
-from tests.conftest import BOWIE, GRRR, UNSURE, Harness
+from tests.conftest import BOWIE, GONE_EMPTY, GRRR, UNSURE, Harness
 from tests.test_machine import confirm_grrr
 
 MOTOR_FAULT = (
@@ -215,6 +215,81 @@ def test_door_fault_reported_after_an_open_is_a_failed_open(hp: Harness) -> None
     wait_for_boot(hp)
     hp.run(seconds=20, motion=False)
     assert hp.feeder.opens == ["open:1", "open:1"]
+
+
+def close_refused(h: Harness) -> None:
+    """Grrr eats and walks off; the device refuses the close, like this morning's 2043."""
+    h.load_plates(1)
+    confirm_grrr(h)
+    h.llm.identify_result = UNSURE
+    assert h.state() == "FEEDING"
+    h.feeder.fail_close = True
+    h.llm.feeding_result = GONE_EMPTY
+    for _ in range(300):
+        h.tick(motion=False)
+        if h.events("close_failed"):
+            return
+    raise AssertionError("the close was never attempted")
+
+
+def test_a_refused_close_is_retried_once_the_feeder_is_back(hp: Harness) -> None:
+    """2026-10-29: close failed with 2043, the plug was cycled, and the machine called the lid
+    closed and moved on. It sat open all day. The lid is open until a close goes through."""
+    close_refused(hp)
+    assert hp.state() == "CLOSING"
+    assert hp.store.get("lid_actual_open") == "1"
+    assert hp.power.calls == ["off"]
+    assert any("CLOSE FAILED (attempt 1)" in a for a in hp.notifier.alerts)
+    assert not hp.events("close")
+    hp.feeder.fail_close = False
+    hp.run(seconds=12, motion=False)
+    assert "close" not in hp.feeder.calls, "nothing is sent until the feeder is back online"
+    wait_for_boot(hp)
+    assert hp.feeder.calls.count("close") == 1
+    assert hp.state() == "COOLDOWN"
+    assert hp.store.get("lid_actual_open") == "0"
+    assert "on attempt 2" in hp.events("close")[0].reason
+    assert hp.store.get("close_attempts") is None
+    assert len(hp.events("close_failed")) == 1
+
+
+def test_close_keeps_retrying_past_the_window_and_the_cycle_gap(hp: Harness) -> None:
+    close_refused(hp)
+    wait_for_boot(hp)
+    assert len(hp.events("close_failed")) == 2, "retried as soon as the feeder came back"
+    assert hp.power.calls == ["off", "on"], "a second fault inside the gap is not cycled"
+    hp.clock.advance(hours=12)  # long past ACTIVE_END: an open lid is still worked on
+    hp.tick(motion=False)
+    assert hp.state() == "CLOSING"
+    assert len(hp.events("close_failed")) == 3
+    hp.feeder.fail_close = False
+    hp.run(seconds=125, motion=False)
+    assert hp.feeder.calls.count("close") == 1
+    assert hp.state() == "OUTSIDE_WINDOW"
+
+
+def test_without_a_plug_a_refused_close_waits_out_the_backoff(h: Harness) -> None:
+    h.config.update({"CONFIRMATIONS_REQUIRED": 2})
+    close_refused(h)
+    h.feeder.fail_close = False
+    h.run(seconds=100, motion=False)
+    assert "close" not in h.feeder.calls  # FEED_RETRY_BACKOFF_S = 120
+    h.run(seconds=30, motion=False)
+    assert h.feeder.calls.count("close") == 1
+    assert h.state() == "COOLDOWN"
+
+
+def test_a_restart_in_closing_still_closes(hp: Harness) -> None:
+    close_refused(hp)
+    hp.feeder.fail_close = False
+    wait_for_boot(hp)
+    hp.store.set("state", "CLOSING")  # died before the retry landed
+    hp.store.set("close_failed_at", hp.clock.now.isoformat())
+    hp.machine = hp.new_machine()
+    hp.machine.start()
+    hp.run(seconds=125, motion=False)
+    assert hp.state() == "COOLDOWN"
+    assert hp.feeder.opens == ["open:1"], "a restart never re-opens"
 
 
 def test_lid_poll_errors_do_not_cycle(hp: Harness) -> None:
