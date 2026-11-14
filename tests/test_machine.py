@@ -836,17 +836,16 @@ def test_an_empty_session_skips_the_cooldown_so_the_next_bowl_can_be_tried(h: Ha
     h.feeder.fail_close = True  # the device refuses mid-swap, like motor error 2043
     confirm_grrr(h)
     assert h.feeder.opens == ["open:1"]  # nothing marked: the bowl under the lid
-    h.run(seconds=25)  # two empty reads -> swap -> refused
+    h.run(seconds=25)  # two empty reads -> swap -> refused, and the close is refused too
     assert h.events("empty_no_food")
+    assert h.state() == "CLOSING", "the lid is open until a close goes through"
+
+    h.feeder.fail_close = False
+    h.clock.advance(seconds=121)  # FEED_RETRY_BACKOFF_S, for the close and the next open
+    h.tick(motion=False)
     assert h.state() in ("IDLE", "WATCHING"), "no food went out, so no cooldown"
     assert h.store.plates()[1] == "eaten"
     assert h.machine.next_allowed_feed() is None
-
-    h.feeder.fail_close = False
-    confirm_grrr(h)
-    assert h.feeder.opens == ["open:1"], "backs off after the device refused"
-    assert h.events("grrr_blocked")
-    h.clock.advance(seconds=121)
     confirm_grrr(h)
     assert h.feeder.opens == ["open:1", "open:2"]  # the next untried bowl, this time with food?
     h.llm.verify_result = HAS_FOOD

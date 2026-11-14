@@ -611,6 +611,17 @@ class Machine:
         self._tick_closing(now)
 
     def _tick_closing(self, now: datetime) -> None:
+        """Close the lid, and stay here until it is really closed. A refused close (motor fault
+        2043) pulls the plug through the fault proxy; the close is sent again once the feeder is
+        back online, or after FEED_RETRY_BACKOFF_S without a plug, for as long as it takes. The
+        lid is only called closed when a close goes through or the feeder says none is open."""
+        if self.plug_is_off() or self.feeder_booting():
+            return  # mid power cycle: the retry goes out once the feeder is back
+        failed_at = self._when("close_failed_at")
+        ready_at = self._when("feeder_ready_at")
+        backoff = timedelta(seconds=self.settings.FEED_RETRY_BACKOFF_S)
+        if failed_at and now - failed_at < backoff and not (ready_at and ready_at > failed_at):
+            return
         feeder = self._feeder()
         plate = self.store.get_int("feeding_plate", 0)
         opened_at = self._when("opened_at") or now
@@ -618,12 +629,12 @@ class Machine:
         # "empty" or "unsure" advances to the next plate next time; only a clearly still-full
         # bowl is offered again. Wrongly advancing costs one bowl; wrongly staying starves.
         plate_status = "loaded" if bowl == "food" else "eaten"
-        error = None
-        close_sent = True
+        attempt = self.store.get_int("close_attempts") + 1
         try:
             close_sent = feeder.close() is not False
         except FeederError as exc:
-            error = str(exc)
+            self._close_failed(now, attempt, str(exc), plate)
+            return
         if plate:
             self.store.set_plate(plate, plate_status, now)
         session_s = int((now - opened_at).total_seconds())
@@ -640,19 +651,22 @@ class Machine:
             # False = the feeder said no lid was open, so nothing was sent. Usually it closed
             # itself; if the lid is in fact open, the feeder and its cloud are out of sync.
             "close_sent": close_sent,
+            "close_attempts": attempt,
         }
-        frames = self._save_frames("close")
-        if error:
-            event_id = self.store.add_event(now, "close_failed", error, data, frames)
-            self._notify(f"CLOSE FAILED after {session_s}s: {error}", event_id, urgent=True)
-        else:
-            how = "" if close_sent else " (feeder reported the lid already closed; nothing sent)"
-            event_id = self.store.add_event(now, "close", f"bowl {bowl}{how}", data, frames)
-            self._notify(
-                f"CLOSED plate {plate} after {session_s}s, bowl {bowl} -> {plate_status}{how}. "
-                f"Loaded plates left: {self.store.loaded_plates()}",
-                event_id,
-            )
+        how = "" if close_sent else " (feeder reported the lid already closed; nothing sent)"
+        if attempt > 1:
+            how += f" on attempt {attempt}"
+        event_id = self.store.add_event(
+            now, "close", f"bowl {bowl}{how}", data, self._save_frames("close")
+        )
+        self._notify(
+            f"CLOSED plate {plate} after {session_s}s, bowl {bowl} -> {plate_status}{how}. "
+            f"Loaded plates left: {self.store.loaded_plates()}",
+            event_id,
+            urgent=attempt > 1,
+        )
+        self.store.set("close_attempts", None)
+        self.store.set("close_failed_at", None)
         self.store.set("lid_actual_open", 0)
         self._forget_verdicts()
         if not fed:
@@ -661,6 +675,27 @@ class Machine:
             self._transition(State.IDLE, "lid closed, no food served: no cooldown", **data)
             return
         self._transition(State.COOLDOWN, "lid closed", **data)
+
+    def _close_failed(self, now: datetime, attempt: int, error: str, plate: int) -> None:
+        """The lid is still open. Stay in CLOSING; _tick_closing sends the close again."""
+        self.store.set("close_attempts", attempt)
+        self.store.set("close_failed_at", now.isoformat())
+        self.store.set("lid_actual_open", 1)
+        data = {
+            "plate": plate,
+            "attempt": attempt,
+            "power_cycling": self.plug_is_off(),
+            "mode": "DRY_RUN" if self.settings.DRY_RUN else "LIVE",
+        }
+        event_id = self.store.add_event(
+            now, "close_failed", error, data, self._save_frames("close_failed")
+        )
+        if attempt == 1 or attempt % 10 == 0:  # every failure is logged; not every one pages
+            self._notify(
+                f"CLOSE FAILED (attempt {attempt}), lid still open, will retry: {error}",
+                event_id,
+                urgent=True,
+            )
 
     def _tick_cooldown(self, now: datetime) -> None:
         last_fed = self._when("last_fed_at")
@@ -1437,6 +1472,8 @@ class Machine:
             "opening_plate",
             "feed_retry",
             "feed_failed_at",
+            "close_attempts",
+            "close_failed_at",
         ):
             self.store.set(key, None)
         for key in ("feeds_this_window", "eaten_count", "verify_empty_count", "verify_rotations"):
