@@ -141,7 +141,7 @@ follow the usual rules. With no press there is no feeding, and Slack gets one re
 - Everything a restart must not forget (state, open timestamps, plates, counters, events)
   is in `data/db/animaleyes.sqlite`. A restart while the lid is open resumes `FEEDING`; it
   never sends `feed` again.
-- CI runs ruff + pytest through `patrickisgreat/actions-toolkit` `python-ci`.
+- CI runs ruff + pytest through `octamagic/actions-toolkit` `python-ci`.
 
 ## What is POC, and what changes later
 

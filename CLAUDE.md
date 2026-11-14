@@ -54,7 +54,7 @@ different lever (prompt, thresholds on the dashboard, reference photos) or escal
 - **Runtime**: Docker Compose (host network) on the robot-computer box, dashboard on
   127.0.0.1:8081 behind basic auth, reached via Cloudflare Tunnel or Tailscale Serve
 - **Testing**: pytest with fakes for clock, LLM, feeder, notifier
-- **CI**: GitHub Actions via `patrickisgreat/actions-toolkit` `python-ci`
+- **CI**: GitHub Actions via `octamagic/actions-toolkit` `python-ci`
 
 ## Common Commands
 

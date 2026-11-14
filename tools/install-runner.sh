@@ -14,7 +14,7 @@
 #   tools/install-runner.sh
 #
 # Otherwise pass one from
-# https://github.com/patrickisgreat/animaleyes/settings/actions/runners/new
+# https://github.com/octamagic/animaleyes/settings/actions/runners/new
 #
 #   tools/install-runner.sh <registration-token>
 #
@@ -23,7 +23,7 @@
 # workflow from the triggering ref, and this box holds the feeder login and the camera.
 set -euo pipefail
 
-REPO="patrickisgreat/animaleyes"
+REPO="octamagic/animaleyes"
 REPO_URL="https://github.com/$REPO"
 
 if ! docker info >/dev/null 2>&1; then
