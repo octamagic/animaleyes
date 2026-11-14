@@ -43,7 +43,7 @@ def test_split_jpegs_handles_partial_tail() -> None:
 
 def secrets(url: str, email: str = "", password: str = "") -> Secrets:
     return Secrets(
-        kasa_stream_url=url,
+        feeder_stream_url=url,
         kasa_email=email,
         kasa_password=password,
         anthropic_api_key="",
@@ -137,7 +137,7 @@ def test_camera_is_found_by_mac_after_a_rescan_on_the_stream_port() -> None:
 def test_missing_camera_or_mac_is_an_error_not_a_guess() -> None:
     with pytest.raises(RuntimeError, match="not found"):
         resolve_stream_url("rtsp://{host}/s", CAM_MAC, lookup=lambda m: None, rescan=lambda p: None)
-    with pytest.raises(RuntimeError, match="KASA_CAMERA_MAC"):
+    with pytest.raises(RuntimeError, match="FEEDER_CAMERA_MAC"):
         resolve_stream_url("rtsp://{host}/s", "")
 
 
@@ -448,6 +448,19 @@ def test_ffmpeg_command_for_a_second_camera_uses_its_own_url_and_mac() -> None:
     feeder = secrets("rtsp://u:p@feeder/stream1")
     cmd = build_ffmpeg_command(feeder, stream_url="rtsp://u:p@bed/sub")
     assert "rtsp://u:p@bed/sub" in cmd and "rtsp://u:p@feeder/stream1" not in cmd
-    with pytest.raises(RuntimeError, match="KASA_CAMERA_MAC"):
+    with pytest.raises(RuntimeError, match="FEEDER_CAMERA_MAC"):
         # {host} needs this camera's own MAC; the feeder's is never borrowed.
         build_ffmpeg_command(feeder, stream_url="rtsp://u:p@{host}/sub", mac="")
+
+
+def test_feeder_camera_env_names_with_the_old_kasa_names_as_fallback(monkeypatch) -> None:
+    for name in ("FEEDER_STREAM_URL", "FEEDER_CAMERA_MAC", "KASA_STREAM_URL", "KASA_CAMERA_MAC"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("KASA_STREAM_URL", "rtsp://old")
+    monkeypatch.setenv("KASA_CAMERA_MAC", "aa:aa")
+    old = Secrets.from_env()
+    assert (old.feeder_stream_url, old.feeder_camera_mac) == ("rtsp://old", "aa:aa")
+    monkeypatch.setenv("FEEDER_STREAM_URL", "rtsp://new")
+    monkeypatch.setenv("FEEDER_CAMERA_MAC", "bb:bb")
+    new = Secrets.from_env()
+    assert (new.feeder_stream_url, new.feeder_camera_mac) == ("rtsp://new", "bb:bb")

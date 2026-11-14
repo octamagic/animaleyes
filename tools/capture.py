@@ -32,7 +32,7 @@ def main() -> None:
     load_dotenv()
     secrets = Secrets.from_env()
     bed = args.camera == "bed"
-    if not (secrets.bed_stream_url if bed else secrets.kasa_stream_url):
+    if not (secrets.bed_stream_url if bed else secrets.feeder_stream_url):
         raise SystemExit(f"{'BED' if bed else 'KASA'}_STREAM_URL is not set in .env")
     args.out.mkdir(parents=True, exist_ok=True)
 

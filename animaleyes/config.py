@@ -215,7 +215,7 @@ class ConfigStore:
 
 @dataclass(frozen=True)
 class Secrets:
-    kasa_stream_url: str
+    feeder_stream_url: str
     kasa_email: str
     kasa_password: str
     anthropic_api_key: str
@@ -224,7 +224,7 @@ class Secrets:
     dash_user: str
     dash_password: str
     dash_public_url: str
-    kasa_camera_mac: str = ""
+    feeder_camera_mac: str = ""
     # Second camera, pointed at Grrr's bed (optional). Same {host} + MAC lookup as the feeder's.
     bed_stream_url: str = ""
     bed_camera_mac: str = ""
@@ -252,7 +252,8 @@ class Secrets:
     def from_env(cls) -> Secrets:
         env = os.environ.get
         return cls(
-            kasa_stream_url=env("KASA_STREAM_URL", ""),
+            # The KASA_* names are from the first camera; still read so an old .env keeps working.
+            feeder_stream_url=env("FEEDER_STREAM_URL", "") or env("KASA_STREAM_URL", ""),
             kasa_email=env("KASA_EMAIL", ""),
             kasa_password=env("KASA_PASSWORD", ""),
             anthropic_api_key=env("ANTHROPIC_API_KEY", ""),
@@ -261,7 +262,7 @@ class Secrets:
             dash_user=env("DASH_USER", ""),
             dash_password=env("DASH_PASSWORD", ""),
             dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8081").rstrip("/"),
-            kasa_camera_mac=env("KASA_CAMERA_MAC", ""),
+            feeder_camera_mac=env("FEEDER_CAMERA_MAC", "") or env("KASA_CAMERA_MAC", ""),
             bed_stream_url=env("BED_STREAM_URL", ""),
             bed_camera_mac=env("BED_CAMERA_MAC", ""),
             smtp_host=env("SMTP_HOST", ""),

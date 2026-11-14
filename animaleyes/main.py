@@ -181,9 +181,9 @@ def build(
         )
     llm = build_identifier(s0.IDENTIFIER, config, store, personas)
     events: ReolinkEvents | None = None
-    if secrets.kasa_stream_url:
+    if secrets.feeder_stream_url:
         # Camera-driven motion gate (ONVIF). Keeps the LLM from firing on frame-diff noise.
-        events = ReolinkEvents(secrets.kasa_stream_url, secrets.kasa_camera_mac)
+        events = ReolinkEvents(secrets.feeder_stream_url, secrets.feeder_camera_mac)
     try:
         feeder = PetlibroCli(secrets.petlibro_serial)
     except FeederError as exc:
@@ -261,12 +261,12 @@ def main() -> None:
     if not (secrets.dash_user and secrets.dash_password):
         raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
     machine, camera, config, store, llm, events, personas, bed_camera = build(secrets)
-    if secrets.kasa_stream_url:
+    if secrets.feeder_stream_url:
         camera.start()
         if events is not None:
             events.start()
     else:
-        log.warning("KASA_STREAM_URL is not set; running without a camera")
+        log.warning("FEEDER_STREAM_URL is not set; running without a camera")
     if bed_camera is not None:
         bed_camera.start()
     machine.start()
@@ -285,8 +285,8 @@ def main() -> None:
         personas=personas,
         themes=ThemeStore(DATA_DIR / "themes.json"),
         frontend_dist=FRONTEND_DIST,
-        ptz=Ptz(secrets.kasa_stream_url, secrets.kasa_camera_mac)
-        if secrets.kasa_stream_url
+        ptz=Ptz(secrets.feeder_stream_url, secrets.feeder_camera_mac)
+        if secrets.feeder_stream_url
         else None,
         bed_ptz=Ptz(secrets.bed_stream_url, secrets.bed_camera_mac)
         if secrets.bed_stream_url

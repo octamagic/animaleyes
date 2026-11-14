@@ -41,7 +41,7 @@ tools/expose.sh grrr.threaditate.com   # once: Cloudflare hostname + Tailscale S
 ```
 
 **Camera address.** The camera takes its IP from DHCP, so the URL in `.env` uses a
-`{host}` placeholder and `KASA_CAMERA_MAC` identifies the camera. On every (re)connect the
+`{host}` placeholder and `FEEDER_CAMERA_MAC` identifies the camera. On every (re)connect the
 app looks the MAC up in the ARP table, knocking on the stream port across the /24 first if
 the entry has aged out. That is why the container runs with `network_mode: host`. A DHCP
 reservation on the router is a good belt-and-braces addition but not required.

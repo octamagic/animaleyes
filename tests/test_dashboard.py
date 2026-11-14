@@ -17,7 +17,7 @@ PASSWORD = secrets_lib.token_urlsafe(16)
 
 def client(h: Harness) -> TestClient:
     secrets = Secrets(
-        kasa_stream_url="",
+        feeder_stream_url="",
         kasa_email="",
         kasa_password="",
         anthropic_api_key="",

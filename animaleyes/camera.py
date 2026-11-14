@@ -113,7 +113,7 @@ def resolve_stream_url(
     if "{host}" not in url:
         return url
     if not mac:
-        raise RuntimeError("KASA_STREAM_URL has {host} but KASA_CAMERA_MAC is not set")
+        raise RuntimeError("FEEDER_STREAM_URL has {host} but FEEDER_CAMERA_MAC is not set")
     ip = lookup(mac)
     if ip is None:
         parts = urlsplit(url.replace("{host}", "placeholder"))
@@ -135,7 +135,7 @@ def build_ffmpeg_command(
 
     Defaults to the feeder camera; pass `stream_url` and `mac` for another one (the bed camera)."""
     if stream_url is None:
-        stream_url, mac = secrets.kasa_stream_url, secrets.kasa_camera_mac
+        stream_url, mac = secrets.feeder_stream_url, secrets.feeder_camera_mac
     url = resolve_stream_url(stream_url, mac)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     if url.startswith("rtsp://"):
