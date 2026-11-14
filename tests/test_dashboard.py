@@ -303,6 +303,11 @@ def test_bed_camera_has_its_own_frame_stream_and_status(h: Harness) -> None:
     bed = c.get("/api/status").json()["bed"]
     assert bed["state"] is None and bed["camera_offline"] is False and bed["camera_age_s"] == 0
 
+    assert bed["has_reference"] is False
+    assert c.post("/api/bed/reference").status_code == 200
+    assert (h.tmp_path / "bed" / "empty.jpg").read_bytes() == bed_jpeg
+    assert c.get("/api/status").json()["bed"]["has_reference"] is True
+
 
 class FakePtz:
     def __init__(self) -> None:

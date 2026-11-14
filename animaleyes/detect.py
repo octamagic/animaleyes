@@ -78,6 +78,27 @@ class FeedingVerdict:
         }
 
 
+@dataclass
+class BedVerdict:
+    """What the bed camera shows. `occupant` is "grrr", "other" (a different animal is in a
+    bed), "empty", or "unsure"; `where` is "under_chair", "front_bed" or "none"."""
+
+    occupant: str = "unsure"
+    where: str = "none"
+    reason: str = ""
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> BedVerdict:
+        return cls(
+            occupant=str(data.get("occupant", "unsure")),
+            where=str(data.get("where", "none")),
+            reason=str(data.get("reason", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"occupant": self.occupant, "where": self.where, "reason": self.reason}
+
+
 class Identifier(Protocol):
     """What the state machine needs from any detector backend."""
 
@@ -88,6 +109,11 @@ class Identifier(Protocol):
     # FeedingVerdict shape (its `bowl` field is "food"/"empty"/"unsure"). Only a backend that
     # can judge food (Claude) answers meaningfully; others return "unsure".
     def verify_food(self, frames: list[Frame]) -> FeedingVerdict: ...
+
+    # The bed camera: is Grrr in one of her beds? `empty_reference` is a JPEG from the same
+    # camera with both beds empty, to compare against (None when none has been saved). Only a
+    # backend that can read a dark, half-hidden dog (Claude) answers; others return "unsure".
+    def bed_check(self, frames: list[Frame], empty_reference: bytes | None) -> BedVerdict: ...
 
     # Optional, for backends with reference imagery (Claude). YOLO no-ops these.
     def reload_references(self) -> None: ...

@@ -5,6 +5,9 @@ from datetime import datetime
 from animaleyes.camera import FrameBuffer
 from animaleyes.detect import FeedingVerdict, Verdict
 from tests.conftest import (
+    BED_EMPTY,
+    BED_OTHER,
+    BED_UNSURE,
     BOWIE,
     CAT,
     EATING,
@@ -13,10 +16,12 @@ from tests.conftest import (
     GONE_FULL,
     GRRR,
     HAS_FOOD,
+    IN_BED,
     NO_FOOD,
     UNSURE,
     FakeLLM,
     Harness,
+    grey_jpeg,
 )
 
 
@@ -1103,62 +1108,105 @@ def test_no_bedtime_reminder_once_we_are_in_bed(tmp_path) -> None:
     assert not h.events("bedtime_reminder")
 
 
-# --- second camera on Grrr's bed ------------------------------------------------------------
-NOBODY = Verdict(animal="none", confidence=0.0, at_bowl=False, reason="no animal detected")
+# --- second camera on Grrr's beds -----------------------------------------------------------
+EMPTY_VIEW, GRRR_VIEW = grey_jpeg(200), grey_jpeg(90)
 
 
 def bed_harness(tmp_path, start: datetime = datetime(2026, 9, 24, 22, 0)) -> Harness:
-    """A harness with a bed camera and the free local detector looking only at the bed."""
+    """A harness with a bed camera showing empty beds."""
     h = Harness(tmp_path, start=start)
-    h.capture_gate = FakeLLM()
     h.bed_frames = FrameBuffer()
-    h.config.update({"ALWAYS_WATCH": False, "BED_WATCH_INTERVAL_S": 5, "BED_CONFIRMATIONS": 3})
+    h.bed_jpeg = EMPTY_VIEW
+    h.llm.bed_result = BED_EMPTY
     h.machine = h.new_machine()
     return h
 
 
+def bed_state(h: Harness) -> str | None:
+    return h.machine.bed_status(h.clock.now)["state"]
+
+
 def test_bed_camera_tracks_grrr_in_and_out_of_bed(tmp_path) -> None:
     h = bed_harness(tmp_path)
-    h.capture_gate.identify_result = GRRR
     h.run(seconds=10, motion=False)
-    assert h.machine.bed_status(h.clock.now)["state"] is None  # two reads: not yet believed
-    h.run(seconds=5, motion=False)
-    assert h.machine.bed_status(h.clock.now)["state"] == "in"
-    assert len(h.events("bed_in")) == 1 and h.events("bed_in")[0].frames
+    assert bed_state(h) == "out" and h.llm.bed_calls == 1  # one look at startup
+    h.clock.advance(minutes=5)
+    h.bed_jpeg, h.llm.bed_result = GRRR_VIEW, IN_BED  # she climbs in
+    h.run(seconds=20, motion=False)
+    assert bed_state(h) == "in"
+    event = h.events("bed_in")[0]
+    assert event.reason == "grrr is in bed under the chair after 5 min up" and event.frames
     h.clock.advance(minutes=42)
-    h.capture_gate.identify_result = NOBODY
-    h.run(seconds=15, motion=False)
-    status = h.machine.bed_status(h.clock.now)
-    assert status["state"] == "out" and status["for_s"] < 5
-    assert "after 42 min in it" in h.events("bed_out")[0].reason
-    h.run(seconds=60, motion=False)
-    assert len(h.events("bed_in")) == 1 and len(h.events("bed_out")) == 1  # no repeats
+    h.bed_jpeg, h.llm.bed_result = EMPTY_VIEW, BED_EMPTY  # and gets up
+    h.run(seconds=20, motion=False)
+    assert bed_state(h) == "out"
+    assert "after 42 min in it" in h.events("bed_out")[0].reason  # newest first
+    assert len(h.events("bed_in")) == 1 and len(h.events("bed_out")) == 2
 
 
-def test_bed_state_ignores_unsure_reads_other_animals_and_single_blips(tmp_path) -> None:
+def test_bed_is_only_read_when_the_picture_changes_or_the_recheck_is_due(tmp_path) -> None:
     h = bed_harness(tmp_path)
-    h.capture_gate.identify_result = GRRR
-    h.run(seconds=15, motion=False)
-    for not_a_vote in (UNSURE, BOWIE, CAT):
-        h.capture_gate.identify_result = not_a_vote
-        h.run(seconds=30, motion=False)
-        assert h.machine.bed_status(h.clock.now)["state"] == "in"
-    for _ in range(4):  # an empty read now and then never adds up to three in a row
-        h.capture_gate.identify_result = NOBODY
-        h.run(seconds=10, motion=False)
-        h.capture_gate.identify_result = GRRR
+    h.config.update({"BED_RECHECK_MIN": 30, "BED_CHECK_MIN_GAP_S": 60})
+    h.run(seconds=20 * 60, motion=False)  # twenty still minutes
+    assert h.llm.bed_calls == 1
+    h.run(seconds=10 * 60 + 10, motion=False)  # the half-hourly recheck
+    assert h.llm.bed_calls == 2
+    h.bed_jpeg = GRRR_VIEW  # the picture changes right after a read:
+    h.run(seconds=30, motion=False)
+    assert h.llm.bed_calls == 2  # ...held back by the minimum gap
+    h.run(seconds=40, motion=False)
+    assert h.llm.bed_calls == 3
+    h.config.update({"BED_WATCH_INTERVAL_S": 0})  # off
+    h.bed_jpeg = EMPTY_VIEW
+    h.run(seconds=40 * 60, motion=False)
+    assert h.llm.bed_calls == 3
+
+
+def test_a_restless_bed_scene_waits_to_settle_but_not_forever(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.run(seconds=90, motion=False)
+    assert h.llm.bed_calls == 1
+    for i in range(30):  # 150 s of the picture changing at every look
+        h.bed_jpeg = grey_jpeg(60 + 100 * (i % 2))
         h.run(seconds=5, motion=False)
-    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    assert h.llm.bed_calls == 2  # read once, at BED_MOVING_MAX_S, despite never settling
+    h.run(seconds=120, motion=False)  # now it holds still, changed since that read
+    assert h.llm.bed_calls == 3
+
+
+def test_unsure_and_other_animals_do_not_change_the_bed_state(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.bed_jpeg, h.llm.bed_result = GRRR_VIEW, IN_BED
+    h.run(seconds=10, motion=False)
+    assert bed_state(h) == "in"
+    for level, not_an_answer in ((120, BED_UNSURE), (150, BED_OTHER)):
+        h.bed_jpeg, h.llm.bed_result = grey_jpeg(level), not_an_answer
+        h.run(seconds=120, motion=False)
+        assert bed_state(h) == "in"
+        assert h.machine.bed_status(h.clock.now)["verdict"]["occupant"] == not_an_answer.occupant
     assert h.events("bed_out") == []
+
+
+def test_bed_check_is_given_the_saved_empty_bed_photo(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.run(seconds=10, motion=False)
+    assert h.llm.bed_references == [None]
+    assert h.machine.bed_status(h.clock.now)["has_reference"] is False
+    (tmp_path / "bed").mkdir()
+    (tmp_path / "bed" / "empty.jpg").write_bytes(EMPTY_VIEW)
+    h.bed_jpeg = GRRR_VIEW
+    h.run(seconds=90, motion=False)
+    assert h.llm.bed_references[-1] == EMPTY_VIEW
+    assert h.machine.bed_status(h.clock.now)["has_reference"] is True
 
 
 def test_bed_state_survives_a_restart(tmp_path) -> None:
     h = bed_harness(tmp_path)
-    h.capture_gate.identify_result = GRRR
-    h.run(seconds=15, motion=False)
+    h.bed_jpeg, h.llm.bed_result = GRRR_VIEW, IN_BED
+    h.run(seconds=10, motion=False)
     h.machine = h.new_machine()
     h.machine.start()
-    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    assert bed_state(h) == "in"
     h.run(seconds=30, motion=False)
     assert len(h.events("bed_in")) == 1
 
@@ -1167,20 +1215,27 @@ def test_grrr_in_bed_never_opens_the_feeder(tmp_path) -> None:
     """The bed camera is visibility only: Grrr on it is not a sighting at the bowl."""
     h = bed_harness(tmp_path)
     h.load_plates(1)
-    h.capture_gate.identify_result = GRRR
-    h.run(seconds=120)  # motion at the bowl the whole time; the feeder camera's LLM says unsure
-    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    h.bed_jpeg, h.llm.bed_result = GRRR_VIEW, IN_BED
+    h.tick(motion=False)
+    assert bed_state(h) == "in"
+    h.run(seconds=120)  # motion at the bowl the whole time; the feeder camera reads unsure
     assert h.feeder.calls == []
     assert h.events("open") == []
 
 
-def test_bed_camera_does_not_change_a_normal_feed(tmp_path) -> None:
+def test_bed_reads_never_run_while_identifying_or_feeding(tmp_path) -> None:
     h = bed_harness(tmp_path)
     h.load_plates(1)
-    h.capture_gate.identify_result = NOBODY  # she's out of bed...
-    h.llm.identify_result = GRRR  # ...and at the bowl
-    h.run(seconds=30)
+    h.tick(motion=False)
+    assert h.llm.bed_calls == 1
+    h.run(seconds=5)
+    assert h.state() == "WATCHING"
+    h.clock.advance(minutes=31)  # a recheck is overdue...
+    h.llm.identify_result = GRRR
+    h.run(seconds=30)  # ...but she is at the bowl: confirm and feed without a bed read
     assert h.feeder.opens == ["open:1"]
+    assert h.state() == "FEEDING"
+    assert h.llm.bed_calls == 1
 
 
 def test_bed_camera_offline_is_logged_and_does_not_stop_feeding(tmp_path) -> None:
@@ -1188,12 +1243,14 @@ def test_bed_camera_offline_is_logged_and_does_not_stop_feeding(tmp_path) -> Non
     h.load_plates(1)
     h.tick(motion=False)
     h.bed_frames = None  # the harness stops pushing bed frames; the machine keeps its buffer
-    h.capture_gate.identify_result = GRRR
     h.run(seconds=90, motion=False)
     assert len(h.events("bed_camera_offline")) == 1
     assert h.events("camera_offline") == []
     assert h.machine.bed_status(h.clock.now)["camera_offline"] is True
-    assert h.machine.bed_status(h.clock.now)["state"] is None  # no reads off a dead camera
+    h.clock.advance(minutes=40)
+    h.push_frame()  # keep the feeder camera alive across the jump
+    h.run(seconds=30, motion=False)
+    assert h.llm.bed_calls == 1  # no reads off a dead camera, recheck or not
     h.llm.identify_result = GRRR
     h.run(seconds=30)
     assert h.feeder.opens == ["open:1"]
@@ -1202,9 +1259,7 @@ def test_bed_camera_offline_is_logged_and_does_not_stop_feeding(tmp_path) -> Non
     assert len(h.events("bed_camera_online")) == 1
 
 
-def test_no_bed_camera_means_no_bed_status_or_reads(tmp_path) -> None:
-    h = watching_harness(tmp_path)
-    h.config.update({"ALWAYS_WATCH": False})
+def test_no_bed_camera_means_no_bed_status_or_reads(h: Harness) -> None:
     h.run(seconds=30, motion=False)
     assert h.machine.bed_status(h.clock.now) is None
-    assert h.capture_gate.identify_calls == 0
+    assert h.llm.bed_calls == 0

@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .camera import Frame
-from .detect import FeedingVerdict, Verdict
+from .detect import BedVerdict, FeedingVerdict, Verdict
 
 log = logging.getLogger(__name__)
 
@@ -234,6 +234,11 @@ class YoloIdentifier:
         # YOLO/COCO has no food class, so it can't tell a served bowl from an empty plate.
         # "unsure" means the state machine won't rotate the tray on YOLO's say-so.
         return FeedingVerdict(bowl="unsure", reason="yolo cannot judge food in the bowl")
+
+    def bed_check(self, frames: list[Frame], empty_reference: bytes | None) -> BedVerdict:
+        # Tried on the real bed camera: a black dog curled up under the chair, half hidden
+        # behind the front bed in IR, is not a "dog" to COCO. Say so rather than report "empty".
+        return BedVerdict(reason="the local detector cannot judge the bed")
 
     def reload_references(self) -> None:
         pass  # no reference imagery for the detector backend

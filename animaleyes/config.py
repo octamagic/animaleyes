@@ -119,12 +119,14 @@ class Settings:
     # it sees. Logging and the dashboard only; it never opens the feeder.
     ALWAYS_WATCH: bool = True
     WATCH_INTERVAL_S: int = 2
-    # Second camera on Grrr's bed (BED_STREAM_URL in .env). The free local detector looks at it
-    # every BED_WATCH_INTERVAL_S (0 = don't) and tracks whether she is in bed or up; the state
-    # flips after BED_CONFIRMATIONS reads in a row that disagree with it. Events and the
+    # Second camera on Grrr's beds (BED_STREAM_URL in .env). Every BED_WATCH_INTERVAL_S (0 =
+    # off) the machine looks whether the picture changed; when it has, and has settled, the LLM
+    # is asked whether she is in bed. It is also asked every BED_RECHECK_MIN (0 = only on a
+    # change), and never more often than BED_CHECK_MIN_GAP_S (the cost ceiling). Events and the
     # dashboard only: it is not an input to any feeding decision.
     BED_WATCH_INTERVAL_S: int = 5
-    BED_CONFIRMATIONS: int = 6
+    BED_RECHECK_MIN: int = 30
+    BED_CHECK_MIN_GAP_S: int = 60
     # Feeding verification: after opening a plate, check with the camera that the served bowl
     # actually has food. If it's confirmed empty, close it and rotate to the next loaded plate,
     # so a wrong/empty plate doesn't mean a midnight rescue. Off by default (it moves the tray

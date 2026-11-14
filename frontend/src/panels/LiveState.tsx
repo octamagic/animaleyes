@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Cam, Status } from "../lib/api";
-import { Card } from "../lib/ui";
+import { api } from "../lib/api";
+import { Card, useToast } from "../lib/ui";
 import { STATES, bedText, verdictText } from "../lib/labels";
 
 const DOT: Record<string, string> = {
@@ -96,6 +97,13 @@ export function LiveView({ s, cam, setCam }: { s: Status | null; cam: Cam; setCa
   }, [s, live, cam]);
 
   const v = !s ? { who: "Waiting…", why: "" } : cam === "bed" ? bedText(s) : verdictText(s);
+  const toast = useToast();
+  // The bed check compares against a photo of the empty beds; this saves the current frame as it.
+  async function saveEmptyBeds() {
+    if (!confirm("Are both beds empty right now? This saves the current picture as the “empty beds” photo the bed check compares against.")) return;
+    const r = await api.post("/api/bed/reference");
+    toast(r.ok ? "Saved the empty-beds photo" : "Couldn't save it", !r.ok);
+  }
   return (
     <Card>
       <div
@@ -131,6 +139,16 @@ export function LiveView({ s, cam, setCam }: { s: Status | null; cam: Cam; setCa
         </div>
       </div>
       {s?.bed && <CamPicker s={s} cam={cam} setCam={setCam} />}
+      {s?.bed && cam === "bed" && (
+        <div className="flex items-center gap-2.5 mt-2.5">
+          <button onClick={saveEmptyBeds} className="btn btn-sm shrink-0">Beds are empty now</button>
+          <span className="text-muted text-xs">
+            {s.bed.has_reference
+              ? "An empty-beds photo is saved. Save a new one if the bedding or camera moves."
+              : "No empty-beds photo yet: save one while she's up so the check can tell empty from hidden."}
+          </span>
+        </div>
+      )}
     </Card>
   );
 }

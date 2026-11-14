@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .camera import Frame
-from .detect import FeedingVerdict, Identifier, Verdict
+from .detect import BedVerdict, FeedingVerdict, Identifier, Verdict
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +119,10 @@ class CascadeIdentifier:
         # Judging whether the served bowl has food needs real vision — route it to Claude
         # (YOLO can't see food). This runs only while a plate is being verified, so it's rare.
         return self.confirm.verify_food(frames)
+
+    def bed_check(self, frames: list[Frame], empty_reference: bytes | None) -> BedVerdict:
+        # The local gate cannot see her in the bed (see YoloIdentifier.bed_check); Claude can.
+        return self.confirm.bed_check(frames, empty_reference)
 
     def reload_references(self) -> None:
         if hasattr(self.confirm, "reload_references"):

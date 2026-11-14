@@ -86,6 +86,7 @@ MAIN_EVENT_KINDS = (
     "settle_restart",
     "bed_in",
     "bed_out",
+    "bed_reference",
     "bed_camera_offline",
     "bed_camera_online",
 )
@@ -563,6 +564,18 @@ def create_app(
         return Response(
             content=frames[0].jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"}
         )
+
+    @app.post("/api/bed/reference", dependencies=guarded)
+    def bed_reference() -> dict[str, bool]:
+        """Save the bed camera's current frame as the "both beds empty" photo the bed check
+        compares against. Writes one image file; nothing here reaches the feeder."""
+        frames = frames_of("bed").latest(1)
+        if not frames or machine.bed_reference is None:
+            raise HTTPException(status_code=404, detail="no bed camera frame yet")
+        machine.bed_reference.parent.mkdir(parents=True, exist_ok=True)
+        machine.bed_reference.write_bytes(frames[0].jpeg)
+        store.add_event(machine.clock(), "bed_reference", "empty-bed photo saved from dashboard")
+        return {"ok": True}
 
     @app.get("/stream.mjpg", dependencies=guarded)
     def stream(cam: str = "feeder") -> StreamingResponse:

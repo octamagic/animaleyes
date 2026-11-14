@@ -222,6 +222,8 @@ def build(
         dashboard_url=secrets.dash_public_url,
         events=events,
         bed_frames=bed_frames,
+        # Under reference/ so it is gitignored like the other photos (not a persona folder).
+        bed_reference=DATA_DIR / "reference" / "bed" / "empty.jpg",
         capture_gate=capture_gate(llm, config),
         capture_dir=DATA_DIR / "training" / "unlabeled",
         healthcheck=_healthcheck(secrets.healthcheck_url),
