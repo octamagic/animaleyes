@@ -17,7 +17,7 @@ PASSWORD = secrets_lib.token_urlsafe(16)
 
 def client(h: Harness) -> TestClient:
     secrets = Secrets(
-        kasa_stream_url="",
+        feeder_stream_url="",
         kasa_email="",
         kasa_password="",
         anthropic_api_key="",
@@ -282,3 +282,56 @@ def test_feed_start_rejects_unknown_modes(h: Harness) -> None:
     c = client(h)
     assert c.post("/api/config", json={"FEED_START": "whenever"}).status_code == 400
     assert c.post("/api/config", json={"FEED_START": "bedtime"}).status_code == 200
+
+
+def test_bed_camera_has_its_own_frame_stream_and_status(h: Harness) -> None:
+    c = client(h)
+    assert c.get("/api/status").json()["bed"] is None
+    assert c.get("/frame.jpg?cam=bed").status_code == 404  # no bed camera configured
+    assert c.get("/stream.mjpg?cam=bed").status_code == 404
+    assert c.get("/frame.jpg?cam=nope").status_code == 404
+
+    h.bed_frames = FrameBuffer()
+    h.machine = h.new_machine()
+    c = client(h)
+    bed_jpeg = b"\xff\xd8BED\xff\xd9"
+    h.push_frame()
+    h.bed_frames.push(Frame(jpeg=bed_jpeg, at=h.clock.now))
+    assert c.get("/frame.jpg?cam=bed").content == bed_jpeg
+    assert c.get("/frame.jpg").content != bed_jpeg  # the default is still the feeder camera
+    assert c.get("/frame.jpg?cam=feeder").content == c.get("/frame.jpg").content
+    bed = c.get("/api/status").json()["bed"]
+    assert bed["state"] is None and bed["camera_offline"] is False and bed["camera_age_s"] == 0
+
+
+class FakePtz:
+    def __init__(self) -> None:
+        self.nudges: list[tuple[float, float, int]] = []
+
+    def nudge(self, dx: float, dy: float, ms: int) -> None:
+        self.nudges.append((dx, dy, ms))
+
+
+def test_ptz_moves_only_the_camera_it_was_asked_to(h: Harness) -> None:
+    feeder_ptz, bed_ptz = FakePtz(), FakePtz()
+    secrets = Secrets(
+        "", "", "", "", "", "", dash_user="me", dash_password=PASSWORD, dash_public_url=""
+    )
+    app = create_app(
+        h.machine,
+        h.store,
+        h.config,
+        secrets,
+        h.tmp_path / "frames",
+        ptz=feeder_ptz,
+        bed_ptz=bed_ptz,
+    )
+    c = TestClient(app)
+    c.auth = ("me", PASSWORD)
+    assert c.post("/api/ptz/nudge?dir=left&cam=bed").status_code == 200
+    assert len(bed_ptz.nudges) == 1 and feeder_ptz.nudges == []
+    assert c.post("/api/ptz/nudge?dir=left").status_code == 200
+    assert len(feeder_ptz.nudges) == 1
+    assert c.post("/api/ptz/nudge?dir=left&cam=nope").status_code == 404
+    status = c.get("/api/status").json()
+    assert status["ptz_available"] is True and status["bed_ptz_available"] is True

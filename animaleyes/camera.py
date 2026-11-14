@@ -113,7 +113,7 @@ def resolve_stream_url(
     if "{host}" not in url:
         return url
     if not mac:
-        raise RuntimeError("KASA_STREAM_URL has {host} but KASA_CAMERA_MAC is not set")
+        raise RuntimeError("FEEDER_STREAM_URL has {host} but FEEDER_CAMERA_MAC is not set")
     ip = lookup(mac)
     if ip is None:
         parts = urlsplit(url.replace("{host}", "placeholder"))
@@ -124,9 +124,19 @@ def resolve_stream_url(
     return url.replace("{host}", ip)
 
 
-def build_ffmpeg_command(secrets: Secrets, fps: int = 2, width: int = FRAME_WIDTH) -> list[str]:
-    """ffmpeg invocation for either an RTSP (newer Kasa) or HTTPS :19443 (older Kasa) stream."""
-    url = resolve_stream_url(secrets.kasa_stream_url, secrets.kasa_camera_mac)
+def build_ffmpeg_command(
+    secrets: Secrets,
+    fps: int = 2,
+    width: int = FRAME_WIDTH,
+    stream_url: str | None = None,
+    mac: str = "",
+) -> list[str]:
+    """ffmpeg invocation for either an RTSP (newer Kasa) or HTTPS :19443 (older Kasa) stream.
+
+    Defaults to the feeder camera; pass `stream_url` and `mac` for another one (the bed camera)."""
+    if stream_url is None:
+        stream_url, mac = secrets.feeder_stream_url, secrets.feeder_camera_mac
+    url = resolve_stream_url(stream_url, mac)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     if url.startswith("rtsp://"):
         cmd += ["-rtsp_transport", "tcp"]
@@ -181,9 +191,15 @@ class Camera(threading.Thread):
         clock: Callable[[], datetime] = datetime.now,
         fps: int = 2,
         stall_s: float = CAMERA_STALL_S,
+        stream_url: str | None = None,
+        mac: str = "",
+        name: str = "camera",
     ):
-        super().__init__(name="camera", daemon=True)
+        super().__init__(name=name, daemon=True)
         self.secrets = secrets
+        # None = the feeder camera from `secrets`; otherwise this camera's own URL and MAC.
+        self.stream_url = stream_url
+        self.mac = mac
         self.buffer = buffer
         self.on_frame = on_frame
         self.clock = clock
@@ -200,16 +216,18 @@ class Camera(threading.Thread):
                 self._stream_once()
             except Exception as exc:  # noqa: BLE001 - keep the camera loop alive
                 self.last_error = str(exc)
-                log.warning("camera stream failed: %s", exc)
+                log.warning("%s stream failed: %s", self.name, exc)
             if self.stop_event.is_set():
                 return
             healthy_for = time.monotonic() - started
             backoff = 2.0 if healthy_for > 60 else min(backoff * 2, 30.0)
-            log.info("camera reconnecting in %.0fs", backoff)
+            log.info("%s reconnecting in %.0fs", self.name, backoff)
             self.stop_event.wait(backoff)
 
     def _stream_once(self) -> None:
-        cmd = build_ffmpeg_command(self.secrets, fps=self.fps)
+        cmd = build_ffmpeg_command(
+            self.secrets, fps=self.fps, stream_url=self.stream_url, mac=self.mac
+        )
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdout is not None
         try:

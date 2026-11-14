@@ -143,6 +143,7 @@ class Harness:
         self.notifier = LogNotifier()
         self.capture_gate = None  # tests set this to a FakeLLM to exercise capture mode
         self.power = None  # tests set this to a FakePower to exercise power cycling
+        self.bed_frames: FrameBuffer | None = None  # tests set this to add the bed camera
         self.machine = self.new_machine()
 
     def new_machine(self) -> Machine:
@@ -161,6 +162,7 @@ class Harness:
             capture_gate=self.capture_gate,
             capture_dir=self.tmp_path / "unlabeled",
             power=self.power,
+            bed_frames=self.bed_frames,
         )
 
     def load_plates(self, *plates: int) -> None:
@@ -171,6 +173,8 @@ class Harness:
 
     def push_frame(self) -> None:
         self.frames.push(Frame(jpeg=TINY_JPEG, at=self.clock.now))
+        if self.bed_frames is not None:
+            self.bed_frames.push(Frame(jpeg=TINY_JPEG, at=self.clock.now))
 
     def motion_now(self) -> None:
         self.motion.last_motion_at = self.clock.now

@@ -81,8 +81,18 @@ class Machine:
         capture_dir: Path | None = None,
         healthcheck: Callable[[], None] | None = None,
         power: PowerSwitch | None = None,
+        bed_frames: FrameBuffer | None = None,
     ):
         self.config = config
+        # Frames from the second camera, on Grrr's bed, or None when there isn't one. Read only
+        # by _tick_bed, which tracks in bed / up for the log and the dashboard.
+        self.bed_frames = bed_frames
+        self.bed_verdict: Verdict | None = None
+        self.bed_verdict_at: datetime | None = None
+        self.last_bed_watch_at: datetime | None = None
+        self.bed_judged_at: datetime | None = None  # timestamp of the last bed frame judged
+        self.bed_votes = 0  # reads in a row that disagree with the persisted bed state
+        self.bed_camera_offline = False
         # The smart plug on the feeder's power, or None. Device-side faults (motor stuck, no
         # response) trigger a power cycle; see _feeder_fault.
         self.power = power
@@ -328,6 +338,7 @@ class Machine:
         if self.settings.CAPTURE_MODE:
             self._tick_capture(now)
         self._tick_watch(now)
+        self._tick_bed(now)
 
         state = self.state
         lid_open = state in (State.VERIFYING, State.FEEDING, State.CLOSING)
@@ -1169,6 +1180,100 @@ class Machine:
         self._log_sightings(
             now, "sighting", list(self.watch_verdicts), frames=frames, include_target=True
         )
+
+    def _tick_bed(self, now: datetime) -> None:
+        """The second camera, on Grrr's bed: is she in it, or up and about?
+
+        The free local detector reads the latest bed frame every BED_WATCH_INTERVAL_S. A
+        confident Grrr is a vote for "in", an empty bed a vote for "out"; unsure, a shaky read
+        or another animal is no vote. The persisted state flips after BED_CONFIRMATIONS votes
+        in a row against it, so one bad frame can't. Visibility only: it writes bed_in /
+        bed_out events and feeds the dashboard. It never moves the machine or the feeder and
+        is not an input to any open decision.
+        """
+        if self.bed_frames is None:
+            return
+        self._check_bed_camera(now)
+        interval = self.settings.BED_WATCH_INTERVAL_S
+        if interval <= 0 or self.capture_gate is None or self.bed_camera_offline:
+            return
+        last = self.last_bed_watch_at
+        if last and (now - last).total_seconds() < interval:
+            return
+        frames = self.bed_frames.latest(1)
+        if not frames or frames[0].at == self.bed_judged_at:
+            return  # nothing new: a stalled stream must not vote with the same frame twice
+        self.last_bed_watch_at = now  # in memory: a restart re-checking sooner is harmless
+        self.bed_judged_at = frames[0].at
+        try:
+            verdict = self.capture_gate.identify(frames)
+        except Exception as exc:  # noqa: BLE001 - a broken detector must not stall the loop
+            self._log_once(now, "bed_watch_error", f"detector failed: {exc}", 3600)
+            return
+        self.bed_verdict = verdict
+        self.bed_verdict_at = now
+        if verdict.is_grrr(self.settings.GRRR_MIN_CONF, False):
+            seen = "in"
+        elif verdict.animal == "none" and not verdict.other_animals_present:
+            seen = "out"
+        else:
+            return
+        if seen == self.store.get("bed_state"):
+            self.bed_votes = 0
+            return
+        self.bed_votes += 1
+        if self.bed_votes < max(1, self.settings.BED_CONFIRMATIONS):
+            return
+        self.bed_votes = 0
+        since = self._when("bed_since")
+        self.store.set("bed_state", seen)
+        self.store.set("bed_since", now.isoformat())
+        mins = int((now - since).total_seconds() // 60) if since else None
+        if seen == "in":
+            reason = "grrr is in her bed" + (f" after {mins} min up" if since else "")
+        else:
+            reason = "grrr left her bed" + (f" after {mins} min in it" if since else "")
+        self.store.add_event(
+            now,
+            f"bed_{seen}",
+            reason,
+            {"verdict": verdict.to_dict(), "previous_since": since.isoformat() if since else None},
+            self._save_frames(f"bed_{seen}", frames),
+        )
+
+    def _check_bed_camera(self, now: datetime) -> None:
+        """Bed camera health. Routine notice only: feeding does not depend on this camera."""
+        assert self.bed_frames is not None
+        last = self.bed_frames.last_frame_at() or self.started_at
+        offline = now - last > timedelta(seconds=CAMERA_OFFLINE_S)
+        if offline and not self.bed_camera_offline:
+            self.bed_camera_offline = True
+            event_id = self.store.add_event(
+                now, "bed_camera_offline", f"no frame for {CAMERA_OFFLINE_S}s"
+            )
+            self._notify("bed camera offline: no frames (feeding is unaffected)", event_id)
+        elif not offline and self.bed_camera_offline:
+            self.bed_camera_offline = False
+            event_id = self.store.add_event(now, "bed_camera_online", "frames resumed")
+            self._notify("bed camera back online", event_id)
+
+    def bed_status(self, now: datetime) -> dict[str, Any] | None:
+        """In bed / up at a glance, for the dashboard. None when there is no bed camera."""
+        if self.bed_frames is None:
+            return None
+        since = self._when("bed_since")
+        last_frame = self.bed_frames.last_frame_at()
+        return {
+            "state": self.store.get("bed_state"),  # "in", "out", or None before the first read
+            "since": since.isoformat(timespec="seconds") if since else None,
+            "for_s": int((now - since).total_seconds()) if since else None,
+            "camera_offline": self.bed_camera_offline,
+            "camera_age_s": int((now - last_frame).total_seconds()) if last_frame else None,
+            "verdict": self.bed_verdict.to_dict() if self.bed_verdict else None,
+            "verdict_age_s": int((now - self.bed_verdict_at).total_seconds())
+            if self.bed_verdict_at
+            else None,
+        }
 
     def _tick_capture(self, now: datetime) -> None:
         """Capture mode: on any motion the local detector reads as an animal, save one frame,

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, usePoll } from "./lib/api";
-import type { Status } from "./lib/api";
+import type { Cam, Status } from "./lib/api";
 import type { ThemeDef } from "./lib/theme";
 import { Badge, ThemeToggle } from "./lib/ui";
 import { Themes } from "./panels/Themes";
@@ -19,6 +19,9 @@ export function App() {
   const reloadThemes = () =>
     fetch("/api/themes").then((r) => r.json()).then(setThemes).catch(() => {});
   useEffect(() => { reloadThemes(); }, []);
+  // Which camera the big live view (and the pan/tilt pad) is on.
+  const [cam, setCam] = useState<Cam>("feeder");
+  const shown: Cam = s?.bed ? cam : "feeder";
 
   return (
     <div className="max-w-[1080px] mx-auto p-4">
@@ -29,6 +32,7 @@ export function App() {
         <span className="flex-1" />
         {s && <Badge tone={s.dry_run ? "pearl" : "teal"}>{s.dry_run ? "Dry run" : "Live"}</Badge>}
         {s && <Badge tone={s.camera_offline ? "bad" : "teal"}>{s.camera_offline ? "Camera offline" : "Camera ok"}</Badge>}
+        {s?.bed?.camera_offline && <Badge tone="bad">Bed camera offline</Badge>}
         {s?.capture_mode && <Badge tone="sage">📸 Capturing</Badge>}
         <ThemeToggle custom={themes} />
       </header>
@@ -36,8 +40,8 @@ export function App() {
       <div className="grid gap-4 md:[grid-template-columns:1.25fr_1fr] md:items-start">
         <div className="grid gap-4 min-w-0">
           <StateBanner s={s} />
-          <LiveView s={s} />
-          <CameraPtz s={s} />
+          <LiveView s={s} cam={shown} setCam={setCam} />
+          <CameraPtz s={s} cam={shown} />
           <Feeder s={s} refresh={refresh} />
           <Plates s={s} refresh={refresh} />
         </div>

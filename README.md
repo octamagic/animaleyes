@@ -41,10 +41,17 @@ tools/expose.sh grrr.threaditate.com   # once: Cloudflare hostname + Tailscale S
 ```
 
 **Camera address.** The camera takes its IP from DHCP, so the URL in `.env` uses a
-`{host}` placeholder and `KASA_CAMERA_MAC` identifies the camera. On every (re)connect the
+`{host}` placeholder and `FEEDER_CAMERA_MAC` identifies the camera. On every (re)connect the
 app looks the MAC up in the ARP table, knocking on the stream port across the /24 first if
 the entry has aged out. That is why the container runs with `network_mode: host`. A DHCP
 reservation on the router is a good belt-and-braces addition but not required.
+
+**Bed camera (optional).** A second camera pointed at Grrr's bed is set with `BED_STREAM_URL`
+and `BED_CAMERA_MAC` in `.env`, found by MAC the same way. The dashboard's live view switches
+between the two cameras, and the free local detector tracks whether Grrr is in bed or up
+(`bed_in` / `bed_out` events, `BED_WATCH_INTERVAL_S`, `BED_CONFIRMATIONS`). It is visibility
+only: nothing the bed camera sees is an input to opening or closing the feeder, and losing it
+does not affect feeding. Prove it with `tools/capture.py --camera bed --once`.
 
 `DRY_RUN` is `true` by default: the machine logs "would open plate N" and never touches
 the feeder. Watch a full dry night, then flip `DRY_RUN` off on the dashboard.

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { Status } from "../lib/api";
+import type { Cam, Status } from "../lib/api";
 import { Card } from "../lib/ui";
-import { STATES, verdictText } from "../lib/labels";
+import { STATES, bedText, verdictText } from "../lib/labels";
 
 const DOT: Record<string, string> = {
   teal: "bg-teal", sage: "bg-sage", pearl: "bg-pearl", muted: "bg-muted", bad: "bg-bad",
@@ -22,12 +22,49 @@ export function StateBanner({ s }: { s: Status | null }) {
   );
 }
 
-export function LiveView({ s }: { s: Status | null }) {
+const CAM_NAMES: Record<Cam, string> = { feeder: "Feeder", bed: "Grrr's bed" };
+
+/** One button per camera under the live view: a still that refreshes every few seconds, its
+ *  name, and what that camera currently knows. Tapping one puts it in the big view. */
+function CamPicker({ s, cam, setCam }: { s: Status; cam: Cam; setCam: (c: Cam) => void }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => { if (!document.hidden) setTick((t) => t + 1); }, 4000);
+    return () => clearInterval(id);
+  }, []);
+  const line: Record<Cam, string> = { feeder: verdictText(s).who, bed: bedText(s).who };
+  return (
+    <div className="grid grid-cols-2 gap-2 mt-2.5">
+      {(["feeder", "bed"] as Cam[]).map((c) => (
+        <button
+          key={c}
+          onClick={() => setCam(c)}
+          aria-pressed={cam === c}
+          className={`flex items-center gap-2.5 p-1.5 rounded-xl border text-left min-w-0 ${
+            cam === c ? "border-teal bg-teal/10" : "border-edge"
+          }`}
+        >
+          <img
+            src={`/frame.jpg?cam=${c}&t=${tick}`}
+            alt=""
+            className="w-16 aspect-video object-cover rounded-lg bg-black shrink-0"
+          />
+          <span className="min-w-0">
+            <span className="block text-sm font-bold">{CAM_NAMES[c]}</span>
+            <span className="block text-muted text-xs truncate">{line[c]}</span>
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function LiveView({ s, cam, setCam }: { s: Status | null; cam: Cam; setCam: (c: Cam) => void }) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState(true);
 
-  const start = () => { if (img.current) img.current.src = "/stream.mjpg?t=" + Date.now(); };
+  const start = () => { if (img.current) img.current.src = `/stream.mjpg?cam=${cam}&t=` + Date.now(); };
   // iPhone Safari has no element fullscreen (only <video>), so the button used to do nothing
   // there. Fall back to taking over the viewport with CSS wherever the real API is missing
   // or refuses.
@@ -51,14 +88,14 @@ export function LiveView({ s }: { s: Status | null }) {
     const onVis = () => { if (live && !document.hidden) start(); };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
-  }, [live]);
+  }, [live, cam]);
   // while paused, refresh a still alongside status
   useEffect(() => {
     if (live || !img.current) return;
-    img.current.src = "/frame.jpg?t=" + Date.now();
-  }, [s, live]);
+    img.current.src = `/frame.jpg?cam=${cam}&t=` + Date.now();
+  }, [s, live, cam]);
 
-  const v = s ? verdictText(s) : { who: "Waiting…", why: "" };
+  const v = !s ? { who: "Waiting…", why: "" } : cam === "bed" ? bedText(s) : verdictText(s);
   return (
     <Card>
       <div
@@ -77,7 +114,7 @@ export function LiveView({ s }: { s: Status | null }) {
         />
         {live && (
           <span className="absolute top-2.5 left-2.5 text-xs font-bold text-teal bg-black/70 backdrop-blur px-2.5 py-1 rounded-full">
-            ● LIVE
+            ● LIVE{s?.bed ? ` · ${CAM_NAMES[cam]}` : ""}
           </span>
         )}
         <div className="absolute top-2.5 right-2.5 flex gap-1.5">
@@ -93,6 +130,7 @@ export function LiveView({ s }: { s: Status | null }) {
           {v.why && <div className="text-muted text-xs mt-0.5">{v.why}</div>}
         </div>
       </div>
+      {s?.bed && <CamPicker s={s} cam={cam} setCam={setCam} />}
     </Card>
   );
 }
