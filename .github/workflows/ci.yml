@@ -6,7 +6,7 @@ on:
 jobs:
   ci:
     # Pinned to @main until actions-toolkit cuts its first tagged release; move to @v1 then.
-    uses: patrickisgreat/actions-toolkit/.github/workflows/python-ci.yml@main
+    uses: octamagic/actions-toolkit/.github/workflows/python-ci.yml@main
     with:
       python-version: '3.12'
       coverage: false
