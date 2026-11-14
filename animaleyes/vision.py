@@ -20,7 +20,7 @@ import anthropic
 from PIL import Image
 
 from .camera import Frame
-from .detect import FeedingVerdict, Identifier, Verdict
+from .detect import BedVerdict, FeedingVerdict, Identifier, Verdict
 from .personas import TARGET_KEY, Persona
 from .store import Store
 
@@ -57,6 +57,38 @@ Rules:
   "unsure" — never feed on a guess.
 - "at_bowl" is true only when the animal's head is at or in the bowl area, not merely nearby.
 - Answer with a single JSON object matching the schema you were given, nothing else."""
+
+
+BED_SYSTEM_PROMPT = """You watch a night-vision camera at floor level pointed at a small dog's
+sleeping spot. There are two beds: a fluffy bed in the foreground, and a second bed behind it,
+underneath a white chair, where she usually sleeps. The dog, Grrr, is tiny with a black curly
+coat. In infrared (greyscale) she shows up as a dark, curly-textured lump, often mostly hidden
+behind the front bed, and the space under the chair is dark too, so look closely for curly fur
+texture against the pale bedding. Other animals in the home: Bowie, a much larger pale
+short-coated dog, and a cat.
+
+Rules:
+- When a reference photo of the empty beds is given, compare the current frame with it,
+  especially the space under the chair.
+- Answer "unsure" rather than guess when the frame is too dark or obscured to tell.
+- Answer with a single JSON object matching the schema you were given, nothing else."""
+
+BED_QUESTION = (
+    "Is Grrr lying in either bed right now? occupant: 'grrr', 'other' (a different animal is "
+    "in a bed), 'empty' (no animal in either bed), or 'unsure'. where: 'under_chair', "
+    "'front_bed', or 'none'."
+)
+
+BED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "occupant": {"type": "string", "enum": ["grrr", "other", "empty", "unsure"]},
+        "where": {"type": "string", "enum": ["under_chair", "front_bed", "none"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["occupant", "where", "reason"],
+    "additionalProperties": False,
+}
 
 
 def identify_schema(keys: list[str]) -> dict[str, Any]:
@@ -248,13 +280,34 @@ class ClaudeIdentifier:
         data = self._ask("verify", frames, verify_question(self.target_name), self.feeding_schema)
         return FeedingVerdict.from_json(data) if data else FeedingVerdict(reason="llm call failed")
 
+    def bed_check(self, frames: list[Frame], empty_reference: bytes | None) -> BedVerdict:
+        # Its own prompt and no animal reference photos: those are overhead shots of the bowl.
+        # What helps here is a picture of the same beds with nobody in them.
+        prefix: list[dict[str, Any]] = []
+        if empty_reference:
+            prefix = [
+                {"type": "text", "text": "Reference photo, same camera, BOTH beds empty:"},
+                image_block(empty_reference),
+            ]
+        data = self._ask(
+            "bed", frames, BED_QUESTION, BED_SCHEMA, system=BED_SYSTEM_PROMPT, prefix=prefix
+        )
+        return BedVerdict.from_json(data) if data else BedVerdict(reason="llm call failed")
+
     def _ask(
-        self, purpose: str, frames: list[Frame], question: str, schema: dict[str, Any]
+        self,
+        purpose: str,
+        frames: list[Frame],
+        question: str,
+        schema: dict[str, Any],
+        *,
+        system: str = SYSTEM_PROMPT,
+        prefix: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         if not frames:
             return None
         model = self.model()
-        content: list[dict[str, Any]] = list(self.reference_blocks)
+        content: list[dict[str, Any]] = list(self.reference_blocks if prefix is None else prefix)
         content.append({"type": "text", "text": "Current camera frames, oldest first:"})
         content.extend(image_block(frame.jpeg) for frame in frames)
         content.append({"type": "text", "text": question})
@@ -265,7 +318,7 @@ class ClaudeIdentifier:
                 system=[
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT,
+                        "text": system,
                         "cache_control": {"type": "ephemeral", "ttl": CACHE_TTL},
                     }
                 ],

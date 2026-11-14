@@ -62,8 +62,9 @@ export type Bed = {
   for_s: number | null;
   camera_offline: boolean;
   camera_age_s: number | null;
-  verdict: Verdict | null;
+  verdict: { occupant: "grrr" | "other" | "empty" | "unsure"; where: string; reason: string } | null;
   verdict_age_s: number | null;
+  has_reference: boolean; // an "empty beds" photo has been saved for the check to compare with
 };
 
 export type Settle = {

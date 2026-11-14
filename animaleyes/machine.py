@@ -23,8 +23,9 @@ from typing import Any
 
 from .camera import Frame, FrameBuffer
 from .config import ConfigStore, Settings
+from .detect import BedVerdict
 from .feeder import Feeder, FeederError, FeederHealth
-from .motion import MotionDetector
+from .motion import MotionDetector, changed_fraction, thumbnail
 from .notify import Notifier
 from .power import PowerError, PowerSwitch
 from .store import Store
@@ -46,6 +47,11 @@ FEED_RETRY_TTL_MIN = 20
 RECENT_VERDICT_S = 60
 # A "We're in bed" press arms that night only; last night's press never arms tonight.
 BEDTIME_TTL_H = 12
+# Bed camera: this fraction of the 64x36 thumbnail changing counts as "the picture changed".
+# Idle IR noise on the real camera measured under 0.007; Grrr herself covers about 0.025.
+BED_CHANGE_FRACTION = 0.012
+# A bed scene that keeps moving is read anyway after this long.
+BED_MOVING_MAX_S = 180
 # States where the machine already runs its own identification or the lid is open.
 WATCH_SKIP_STATES = ("WATCHING", "OPENING", "VERIFYING", "FEEDING", "CLOSING")
 
@@ -82,16 +88,20 @@ class Machine:
         healthcheck: Callable[[], None] | None = None,
         power: PowerSwitch | None = None,
         bed_frames: FrameBuffer | None = None,
+        bed_reference: Path | None = None,
     ):
         self.config = config
         # Frames from the second camera, on Grrr's bed, or None when there isn't one. Read only
         # by _tick_bed, which tracks in bed / up for the log and the dashboard.
         self.bed_frames = bed_frames
-        self.bed_verdict: Verdict | None = None
+        self.bed_verdict: BedVerdict | None = None
         self.bed_verdict_at: datetime | None = None
         self.last_bed_watch_at: datetime | None = None
-        self.bed_judged_at: datetime | None = None  # timestamp of the last bed frame judged
-        self.bed_votes = 0  # reads in a row that disagree with the persisted bed state
+        self.bed_checked_at: datetime | None = None  # when the LLM last read the bed
+        self.bed_last_look = None  # thumbnail from the previous look: is the scene moving?
+        self.bed_judged_look = None  # thumbnail the last read was made on: has it changed?
+        # A JPEG of the bed camera's view with both beds empty, saved from the dashboard.
+        self.bed_reference = bed_reference
         self.bed_camera_offline = False
         # The smart plug on the feeder's power, or None. Device-side faults (motor stuck, no
         # response) trigger a power cycle; see _feeder_fault.
@@ -1182,55 +1192,63 @@ class Machine:
         )
 
     def _tick_bed(self, now: datetime) -> None:
-        """The second camera, on Grrr's bed: is she in it, or up and about?
+        """The second camera, on Grrr's beds: is she in one, or up and about?
 
-        The free local detector reads the latest bed frame every BED_WATCH_INTERVAL_S. A
-        confident Grrr is a vote for "in", an empty bed a vote for "out"; unsure, a shaky read
-        or another animal is no vote. The persisted state flips after BED_CONFIRMATIONS votes
-        in a row against it, so one bad frame can't. Visibility only: it writes bed_in /
-        bed_out events and feeds the dashboard. It never moves the machine or the feeder and
-        is not an input to any open decision.
+        She sleeps curled up under a chair, half hidden behind the front bed, where the free
+        local detector sees nothing, so the read comes from the LLM (bed_check), given a saved
+        photo of the empty beds to compare with. To keep that cheap it is only asked when the
+        picture has changed since the last read and has stopped changing (she arrived, left or
+        moved), plus every BED_RECHECK_MIN regardless, and never more often than
+        BED_CHECK_MIN_GAP_S. Not while the machine is identifying or the lid is open: those
+        ticks must not wait on a bed read, and she is at the feeder then anyway.
+
+        "grrr" sets the state to in, "empty" to out; "other" and "unsure" change nothing.
+        Visibility only: bed_in / bed_out events and the dashboard. It never moves the machine
+        or the feeder and is not an input to any open decision.
         """
         if self.bed_frames is None:
             return
         self._check_bed_camera(now)
         interval = self.settings.BED_WATCH_INTERVAL_S
-        if interval <= 0 or self.capture_gate is None or self.bed_camera_offline:
+        if interval <= 0 or self.bed_camera_offline or self.state in WATCH_SKIP_STATES:
             return
         last = self.last_bed_watch_at
         if last and (now - last).total_seconds() < interval:
             return
         frames = self.bed_frames.latest(1)
-        if not frames or frames[0].at == self.bed_judged_at:
-            return  # nothing new: a stalled stream must not vote with the same frame twice
+        if not frames:
+            return
         self.last_bed_watch_at = now  # in memory: a restart re-checking sooner is harmless
-        self.bed_judged_at = frames[0].at
+        look = thumbnail(frames[0].jpeg)
+        moving = (
+            self.bed_last_look is not None
+            and changed_fraction(self.bed_last_look, look) >= BED_CHANGE_FRACTION
+        )
+        self.bed_last_look = look
+        if not self._bed_check_due(now, look, moving):
+            return
+        self.bed_checked_at = now
+        self.bed_judged_look = look
+        reference = self.bed_reference.read_bytes() if self.bed_reference_exists() else None
         try:
-            verdict = self.capture_gate.identify(frames)
+            verdict = self.llm.bed_check(frames, reference)
         except Exception as exc:  # noqa: BLE001 - a broken detector must not stall the loop
-            self._log_once(now, "bed_watch_error", f"detector failed: {exc}", 3600)
+            self._log_once(now, "bed_watch_error", f"bed check failed: {exc}", 3600)
             return
         self.bed_verdict = verdict
         self.bed_verdict_at = now
-        if verdict.is_grrr(self.settings.GRRR_MIN_CONF, False):
-            seen = "in"
-        elif verdict.animal == "none" and not verdict.other_animals_present:
-            seen = "out"
-        else:
+        seen = {"grrr": "in", "empty": "out"}.get(verdict.occupant)
+        if seen is None or seen == self.store.get("bed_state"):
             return
-        if seen == self.store.get("bed_state"):
-            self.bed_votes = 0
-            return
-        self.bed_votes += 1
-        if self.bed_votes < max(1, self.settings.BED_CONFIRMATIONS):
-            return
-        self.bed_votes = 0
         since = self._when("bed_since")
         self.store.set("bed_state", seen)
         self.store.set("bed_since", now.isoformat())
         mins = int((now - since).total_seconds() // 60) if since else None
         if seen == "in":
-            reason = "grrr is in her bed" + (f" after {mins} min up" if since else "")
+            spot = {"under_chair": " under the chair", "front_bed": " in the front bed"}
+            reason = f"grrr is in bed{spot.get(verdict.where, '')}" + (
+                f" after {mins} min up" if since else ""
+            )
         else:
             reason = "grrr left her bed" + (f" after {mins} min in it" if since else "")
         self.store.add_event(
@@ -1240,6 +1258,24 @@ class Machine:
             {"verdict": verdict.to_dict(), "previous_since": since.isoformat() if since else None},
             self._save_frames(f"bed_{seen}", frames),
         )
+
+    def _bed_check_due(self, now: datetime, look, moving: bool) -> bool:
+        """Ask the LLM about the bed now? See _tick_bed for the rules."""
+        checked = self.bed_checked_at
+        if checked is None or self.bed_judged_look is None:
+            return True  # first look since startup
+        age = (now - checked).total_seconds()
+        if age < max(1, self.settings.BED_CHECK_MIN_GAP_S):
+            return False
+        recheck_min = self.settings.BED_RECHECK_MIN
+        if recheck_min > 0 and age >= recheck_min * 60:
+            return True
+        changed = changed_fraction(self.bed_judged_look, look) >= BED_CHANGE_FRACTION
+        # Wait for the scene to hold still, but not forever: a restless dog still gets a read.
+        return changed and (not moving or age >= BED_MOVING_MAX_S)
+
+    def bed_reference_exists(self) -> bool:
+        return self.bed_reference is not None and self.bed_reference.is_file()
 
     def _check_bed_camera(self, now: datetime) -> None:
         """Bed camera health. Routine notice only: feeding does not depend on this camera."""
@@ -1273,6 +1309,7 @@ class Machine:
             "verdict_age_s": int((now - self.bed_verdict_at).total_seconds())
             if self.bed_verdict_at
             else None,
+            "has_reference": self.bed_reference_exists(),
         }
 
     def _tick_capture(self, now: datetime) -> None:

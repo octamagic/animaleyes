@@ -7,6 +7,7 @@ import pytest
 
 from animaleyes.camera import Frame, FrameBuffer
 from animaleyes.config import ConfigStore
+from animaleyes.detect import BedVerdict
 from animaleyes.feeder import FeederError, FeederHealth
 from animaleyes.machine import Machine
 from animaleyes.motion import MotionDetector
@@ -45,8 +46,28 @@ NO_FOOD = FeedingVerdict(grrr_at_bowl=False, bowl="empty", reason="plate is empt
 FOOD_UNSURE = FeedingVerdict(grrr_at_bowl=False, bowl="unsure", reason="can't tell")
 
 
+IN_BED = BedVerdict(occupant="grrr", where="under_chair", reason="dark curly lump under chair")
+BED_EMPTY = BedVerdict(occupant="empty", where="none", reason="matches the empty reference")
+BED_UNSURE = BedVerdict(occupant="unsure", where="none", reason="too dark")
+BED_OTHER = BedVerdict(occupant="other", where="front_bed", reason="the cat is in the front bed")
+
+
+def grey_jpeg(level: int) -> bytes:
+    """A flat grey frame; two different levels read as "the picture changed"."""
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("L", (64, 36), level).save(out, "JPEG")
+    return out.getvalue()
+
+
 class FakeLLM:
     def __init__(self) -> None:
+        self.bed_result: BedVerdict = BED_UNSURE
+        self.bed_calls = 0
+        self.bed_references: list[bytes | None] = []
         self.identify_result: Verdict = UNSURE
         self.feeding_result: FeedingVerdict = EATING
         self.verify_result: FeedingVerdict = HAS_FOOD
@@ -58,6 +79,11 @@ class FakeLLM:
     def identify(self, frames):
         self.identify_calls += 1
         return self.identify_result
+
+    def bed_check(self, frames, empty_reference):
+        self.bed_calls += 1
+        self.bed_references.append(empty_reference)
+        return self.bed_result
 
     def feeding_check(self, frames):
         self.feeding_calls += 1
@@ -144,6 +170,7 @@ class Harness:
         self.capture_gate = None  # tests set this to a FakeLLM to exercise capture mode
         self.power = None  # tests set this to a FakePower to exercise power cycling
         self.bed_frames: FrameBuffer | None = None  # tests set this to add the bed camera
+        self.bed_jpeg = grey_jpeg(200)  # what the bed camera currently shows
         self.machine = self.new_machine()
 
     def new_machine(self) -> Machine:
@@ -163,6 +190,7 @@ class Harness:
             capture_dir=self.tmp_path / "unlabeled",
             power=self.power,
             bed_frames=self.bed_frames,
+            bed_reference=self.tmp_path / "bed" / "empty.jpg",
         )
 
     def load_plates(self, *plates: int) -> None:
@@ -174,7 +202,7 @@ class Harness:
     def push_frame(self) -> None:
         self.frames.push(Frame(jpeg=TINY_JPEG, at=self.clock.now))
         if self.bed_frames is not None:
-            self.bed_frames.push(Frame(jpeg=TINY_JPEG, at=self.clock.now))
+            self.bed_frames.push(Frame(jpeg=self.bed_jpeg, at=self.clock.now))
 
     def motion_now(self) -> None:
         self.motion.last_motion_at = self.clock.now

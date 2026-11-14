@@ -35,6 +35,7 @@ export const EVENTS: Record<string, [string, string]> = {
   feed_given_up: ["🛑", "Feed given up after retries"], retry_held: ["⏸️", "Retry held: another animal in view"],
   config: ["⚙️", "Settings changed"],
   bed_in: ["🛏️", "Grrr in bed"], bed_out: ["🐾", "Grrr out of bed"],
+  bed_reference: ["📷", "Empty-bed photo saved"],
   bed_camera_offline: ["📵", "Bed camera offline"], bed_camera_online: ["📶", "Bed camera back online"],
 };
 
@@ -73,12 +74,15 @@ export function bedText(s: Status): { who: string; why: string } {
     : b.state === "out" ? "Grrr is up" + fmtFor(b.for_s)
     : "Not sure yet";
   const v = b.verdict;
-  const names = nameMap(s.personas);
-  const saw = !v ? "No read yet"
-    : v.animal === "none" ? "Bed looks empty"
-    : v.animal === "unsure" ? "Something in the bed, not sure who"
-    : `Sees ${names[v.animal] || v.animal} · ${Math.round((v.confidence || 0) * 100)}%`;
-  return { who, why: saw };
+  const where = v?.occupant === "grrr" && b.state === "in"
+    ? v.where === "under_chair" ? " under the chair" : v.where === "front_bed" ? " in the front bed" : ""
+    : "";
+  const last = !v ? "No read yet"
+    : v.occupant === "other" ? "Another animal is in the bed"
+    : v.occupant === "unsure" ? "Last look: couldn't tell"
+    : v.reason;
+  const saw = last + (v && b.verdict_age_s != null ? ` · checked ${fmtAge(b.verdict_age_s)}` : "");
+  return { who: who.replace("is in bed", "is in bed" + where), why: saw };
 }
 
 export function motionText(s: Status): string {

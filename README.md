@@ -46,12 +46,16 @@ app looks the MAC up in the ARP table, knocking on the stream port across the /2
 the entry has aged out. That is why the container runs with `network_mode: host`. A DHCP
 reservation on the router is a good belt-and-braces addition but not required.
 
-**Bed camera (optional).** A second camera pointed at Grrr's bed is set with `BED_STREAM_URL`
+**Bed camera (optional).** A second camera pointed at Grrr's beds is set with `BED_STREAM_URL`
 and `BED_CAMERA_MAC` in `.env`, found by MAC the same way. The dashboard's live view switches
-between the two cameras, and the free local detector tracks whether Grrr is in bed or up
-(`bed_in` / `bed_out` events, `BED_WATCH_INTERVAL_S`, `BED_CONFIRMATIONS`). It is visibility
-only: nothing the bed camera sees is an input to opening or closing the feeder, and losing it
-does not affect feeding. Prove it with `tools/capture.py --camera bed --once`.
+between the two cameras and tracks whether Grrr is in bed or up (`bed_in` / `bed_out` events).
+She sleeps curled up under a chair, half hidden, where the local detector sees nothing, so the
+read comes from Claude, compared against a saved photo of the empty beds (**Beds are empty
+now** on the bed camera's view; save a new one if the bedding or camera moves). Claude is only
+asked when the picture has changed and settled, every `BED_RECHECK_MIN` regardless, and at
+most once per `BED_CHECK_MIN_GAP_S`; a read costs about a cent. It is visibility only: nothing
+the bed camera sees is an input to opening or closing the feeder, and losing it does not
+affect feeding. Prove it with `tools/capture.py --camera bed --once`.
 
 `DRY_RUN` is `true` by default: the machine logs "would open plate N" and never touches
 the feeder. Watch a full dry night, then flip `DRY_RUN` off on the dashboard.
