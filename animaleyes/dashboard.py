@@ -84,6 +84,10 @@ MAIN_EVENT_KINDS = (
     "bedtime_reminder",
     "settled",
     "settle_restart",
+    "bed_in",
+    "bed_out",
+    "bed_camera_offline",
+    "bed_camera_online",
 )
 
 
@@ -100,11 +104,24 @@ def create_app(
     themes=None,
     frontend_dist: Path | None = None,
     ptz=None,
+    bed_ptz=None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
     index_html = frontend_dist / "index.html" if frontend_dist else None
     PHOTO_SETS = {"reference": reference_dir, "training": training_dir}
     IMG_EXT = (".jpg", ".jpeg", ".png")
+
+    def frames_of(cam: str) -> FrameBuffer:
+        """The buffer behind ?cam=: "feeder" (default) or "bed" when there is a bed camera."""
+        buffer = {"feeder": machine.frames, "bed": machine.bed_frames}.get(cam)
+        if buffer is None:
+            raise HTTPException(status_code=404, detail=f"no {cam} camera")
+        return buffer
+
+    def ptz_of(cam: str):
+        if cam not in ("feeder", "bed"):
+            raise HTTPException(status_code=404, detail=f"no {cam} camera")
+        return bed_ptz if cam == "bed" else ptz
 
     def animal_keys() -> list[str]:
         # The roster is persona-driven; fall back to the fixed trio when no store is wired (tests).
@@ -255,6 +272,9 @@ def create_app(
             "llm_model": settings.LLM_MODEL,
             "identifier": settings.IDENTIFIER,
             "ptz_available": ptz is not None,
+            # Second camera on Grrr's bed: None when there isn't one.
+            "bed": machine.bed_status(now),
+            "bed_ptz_available": bed_ptz is not None,
             # Feeder power (smart plug): drives the Power cycle button and the rebooting pills.
             "power_cycle_available": machine.power is not None,
             "plug_off": machine.plug_is_off(),
@@ -307,7 +327,8 @@ def create_app(
     PTZ_DIRS = {"up": (0.0, 1.0), "down": (0.0, -1.0), "left": (-1.0, 0.0), "right": (1.0, 0.0)}
 
     @app.post("/api/ptz/nudge", dependencies=guarded)
-    def ptz_nudge(dir: str) -> dict[str, str]:
+    def ptz_nudge(dir: str, cam: str = "feeder") -> dict[str, str]:
+        ptz = ptz_of(cam)
         if ptz is None:
             raise HTTPException(status_code=503, detail="no camera")
         if dir not in PTZ_DIRS:
@@ -321,7 +342,8 @@ def create_app(
         return {"ok": dir}
 
     @app.post("/api/ptz/stop", dependencies=guarded)
-    def ptz_stop() -> dict[str, bool]:
+    def ptz_stop(cam: str = "feeder") -> dict[str, bool]:
+        ptz = ptz_of(cam)
         if ptz is not None:
             try:
                 ptz.stop()
@@ -330,7 +352,8 @@ def create_app(
         return {"ok": True}
 
     @app.get("/api/ptz/presets", dependencies=guarded)
-    def ptz_presets() -> dict[str, Any]:
+    def ptz_presets(cam: str = "feeder") -> dict[str, Any]:
+        ptz = ptz_of(cam)
         if ptz is None:
             return {"presets": []}
         try:
@@ -339,7 +362,8 @@ def create_app(
             return {"presets": []}
 
     @app.post("/api/ptz/preset", dependencies=guarded)
-    async def ptz_set_preset(request: Request) -> dict[str, bool]:
+    async def ptz_set_preset(request: Request, cam: str = "feeder") -> dict[str, bool]:
+        ptz = ptz_of(cam)
         if ptz is None:
             raise HTTPException(status_code=503, detail="no camera")
         name = (await request.json()).get("name", "preset")
@@ -347,7 +371,8 @@ def create_app(
         return {"ok": True}
 
     @app.post("/api/ptz/goto", dependencies=guarded)
-    def ptz_goto(token: str) -> dict[str, bool]:
+    def ptz_goto(token: str, cam: str = "feeder") -> dict[str, bool]:
+        ptz = ptz_of(cam)
         if ptz is None:
             raise HTTPException(status_code=503, detail="no camera")
         ptz.goto(token)
@@ -531,8 +556,8 @@ def create_app(
         return {"ok": True}
 
     @app.get("/frame.jpg", dependencies=guarded)
-    def frame() -> Response:
-        frames = machine.frames.latest(1)
+    def frame(cam: str = "feeder") -> Response:
+        frames = frames_of(cam).latest(1)
         if not frames:
             raise HTTPException(status_code=404, detail="no frame yet")
         return Response(
@@ -540,12 +565,12 @@ def create_app(
         )
 
     @app.get("/stream.mjpg", dependencies=guarded)
-    def stream() -> StreamingResponse:
+    def stream(cam: str = "feeder") -> StreamingResponse:
         # Read-only view of the frames the camera thread already decodes; it opens no new
         # connection to the camera. POC: runs at the ingest rate (~2 fps), which motion
         # detection is tuned for.
         return StreamingResponse(
-            mjpeg(machine.frames),
+            mjpeg(frames_of(cam)),
             media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )

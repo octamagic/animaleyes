@@ -142,7 +142,16 @@ def _healthcheck(url: str):
 
 def build(
     secrets: Secrets,
-) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None, PersonaStore]:
+) -> tuple[
+    Machine,
+    Camera,
+    ConfigStore,
+    Store,
+    Identifier,
+    ReolinkEvents | None,
+    PersonaStore,
+    Camera | None,
+]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
     s0 = config.load()
@@ -156,6 +165,20 @@ def build(
     frames = FrameBuffer(size=max(12, fps * 4))  # ~4s of history regardless of fps
     motion = MotionDetector()
     camera = Camera(secrets, frames, on_frame=motion.feed, fps=fps)
+    # Optional second camera on Grrr's bed: its own buffer, no motion detector, no ONVIF
+    # events. The machine only reads it to track in bed / up; it never gates the feeder.
+    bed_frames: FrameBuffer | None = None
+    bed_camera: Camera | None = None
+    if secrets.bed_stream_url:
+        bed_frames = FrameBuffer(size=max(12, fps * 4))
+        bed_camera = Camera(
+            secrets,
+            bed_frames,
+            fps=fps,
+            stream_url=secrets.bed_stream_url,
+            mac=secrets.bed_camera_mac,
+            name="bed-camera",
+        )
     llm = build_identifier(s0.IDENTIFIER, config, store, personas)
     events: ReolinkEvents | None = None
     if secrets.kasa_stream_url:
@@ -198,6 +221,7 @@ def build(
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
         events=events,
+        bed_frames=bed_frames,
         capture_gate=capture_gate(llm, config),
         capture_dir=DATA_DIR / "training" / "unlabeled",
         healthcheck=_healthcheck(secrets.healthcheck_url),
@@ -211,7 +235,7 @@ def build(
             secrets.smart_plug_on_cmd,
         ),
     )
-    return machine, camera, config, store, llm, events, personas
+    return machine, camera, config, store, llm, events, personas, bed_camera
 
 
 def run_loop(machine: Machine, stop: threading.Event) -> None:
@@ -236,13 +260,15 @@ def main() -> None:
     secrets = Secrets.from_env()
     if not (secrets.dash_user and secrets.dash_password):
         raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
-    machine, camera, config, store, llm, events, personas = build(secrets)
+    machine, camera, config, store, llm, events, personas, bed_camera = build(secrets)
     if secrets.kasa_stream_url:
         camera.start()
         if events is not None:
             events.start()
     else:
         log.warning("KASA_STREAM_URL is not set; running without a camera")
+    if bed_camera is not None:
+        bed_camera.start()
     machine.start()
     stop = threading.Event()
     worker = threading.Thread(target=run_loop, args=(machine, stop), name="machine", daemon=True)
@@ -262,6 +288,9 @@ def main() -> None:
         ptz=Ptz(secrets.kasa_stream_url, secrets.kasa_camera_mac)
         if secrets.kasa_stream_url
         else None,
+        bed_ptz=Ptz(secrets.bed_stream_url, secrets.bed_camera_mac)
+        if secrets.bed_stream_url
+        else None,
     )
     try:
         uvicorn.run(
@@ -273,6 +302,8 @@ def main() -> None:
     finally:
         stop.set()
         camera.stop()
+        if bed_camera is not None:
+            bed_camera.stop()
         if events is not None:
             events.stop()
         worker.join(timeout=5)

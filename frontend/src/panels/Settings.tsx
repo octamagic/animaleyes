@@ -38,6 +38,8 @@ const CONTROLS: Ctl[] = [
   { key: "CAPTURE_MIN_GAP_S", label: "Min seconds between captures", type: "number", group: "Training" },
   { key: "ALWAYS_WATCH", label: "Always watch & log animals (local model, incl. off hours)", type: "bool", group: "Training" },
   { key: "WATCH_INTERVAL_S", label: "Seconds between always-on checks", type: "number", group: "Training" },
+  { key: "BED_WATCH_INTERVAL_S", label: "Bed camera: check for Grrr every (sec, 0 = off)", type: "number", group: "Motion & sensing" },
+  { key: "BED_CONFIRMATIONS", label: "Bed camera: reads in a row before in bed / up changes", type: "number", group: "Motion & sensing" },
   { key: "LID_POLL_S", label: "Lid check interval (sec)", type: "number", group: "Advanced" },
   { key: "FEED_RETRIES", label: "Retry a failed feed this many times", type: "number", group: "Feeder power" },
   { key: "FEED_RETRY_BACKOFF_S", label: "Retry delay when there is no plug (sec)", type: "number", group: "Feeder power" },

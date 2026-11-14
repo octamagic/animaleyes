@@ -442,3 +442,12 @@ def test_pushover_payload_is_emergency_priority() -> None:
     assert p["retry"] >= 30 and p["expire"] <= 10800  # clamped to Pushover's limits
     assert p["message"] == "camera offline"
     n.send("routine")  # routine never pushes, must not raise
+
+
+def test_ffmpeg_command_for_a_second_camera_uses_its_own_url_and_mac() -> None:
+    feeder = secrets("rtsp://u:p@feeder/stream1")
+    cmd = build_ffmpeg_command(feeder, stream_url="rtsp://u:p@bed/sub")
+    assert "rtsp://u:p@bed/sub" in cmd and "rtsp://u:p@feeder/stream1" not in cmd
+    with pytest.raises(RuntimeError, match="KASA_CAMERA_MAC"):
+        # {host} needs this camera's own MAC; the feeder's is never borrowed.
+        build_ffmpeg_command(feeder, stream_url="rtsp://u:p@{host}/sub", mac="")

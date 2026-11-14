@@ -1,6 +1,6 @@
 """Save a frame from the camera every N seconds so you can pick reference photos.
 
-Usage: python tools/capture.py [--every 10] [--minutes 60] [--out data/captures]
+Usage: python tools/capture.py [--camera bed] [--every 10] [--minutes 60] [--out data/captures]
 Reads the camera settings from .env. Prints each saved path.
 """
 
@@ -26,16 +26,23 @@ def main() -> None:
     parser.add_argument("--minutes", type=float, default=60, help="how long to run")
     parser.add_argument("--out", type=Path, default=Path("data/captures"))
     parser.add_argument("--once", action="store_true", help="save one frame and exit")
+    parser.add_argument("--camera", choices=("feeder", "bed"), default="feeder")
     args = parser.parse_args()
 
     load_dotenv()
     secrets = Secrets.from_env()
-    if not secrets.kasa_stream_url:
-        raise SystemExit("KASA_STREAM_URL is not set in .env")
+    bed = args.camera == "bed"
+    if not (secrets.bed_stream_url if bed else secrets.kasa_stream_url):
+        raise SystemExit(f"{'BED' if bed else 'KASA'}_STREAM_URL is not set in .env")
     args.out.mkdir(parents=True, exist_ok=True)
 
     buffer = FrameBuffer()
-    camera = Camera(secrets, buffer)
+    if bed:
+        camera = Camera(
+            secrets, buffer, stream_url=secrets.bed_stream_url, mac=secrets.bed_camera_mac
+        )
+    else:
+        camera = Camera(secrets, buffer)
     camera.start()
     deadline = time.monotonic() + args.minutes * 60
     last_saved: datetime | None = None

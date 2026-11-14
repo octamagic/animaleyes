@@ -1,6 +1,6 @@
 import type { Status } from "../lib/api";
 import { Card, Tile } from "../lib/ui";
-import { fmtAge, fmtIn, motionText } from "../lib/labels";
+import { bedText, fmtAge, fmtIn, motionText } from "../lib/labels";
 
 const DETECTOR: Record<string, string> = {
   cascade: "Cascade (local + Claude)", yolo: "YOLO (local)", claude: "Claude",
@@ -13,6 +13,7 @@ export function StatusTiles({ s }: { s: Status | null }) {
         ["Next feed", s.next_allowed_feed_in_s ? fmtIn(s.next_allowed_feed_in_s) : "now"],
         ["Loaded plates", s.loaded_plates.length ? s.loaded_plates.join(", ") : "none"],
         ["Camera", s.camera_age_s == null ? "no frames" : fmtAge(s.camera_age_s)],
+        ...(s.bed ? [["Grrr's bed", bedText(s).who.replace(/^Grrr is /, "")] as [string, string]] : []),
         ["Motion", motionText(s)],
         ["Detector", DETECTOR[s.identifier] || s.identifier || "—"],
         ["Checks today", `${s.llm_calls_today}${s.llm_cost_today_usd ? " · $" + s.llm_cost_today_usd.toFixed(2) : ""}`],

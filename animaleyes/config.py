@@ -119,6 +119,12 @@ class Settings:
     # it sees. Logging and the dashboard only; it never opens the feeder.
     ALWAYS_WATCH: bool = True
     WATCH_INTERVAL_S: int = 2
+    # Second camera on Grrr's bed (BED_STREAM_URL in .env). The free local detector looks at it
+    # every BED_WATCH_INTERVAL_S (0 = don't) and tracks whether she is in bed or up; the state
+    # flips after BED_CONFIRMATIONS reads in a row that disagree with it. Events and the
+    # dashboard only: it is not an input to any feeding decision.
+    BED_WATCH_INTERVAL_S: int = 5
+    BED_CONFIRMATIONS: int = 6
     # Feeding verification: after opening a plate, check with the camera that the served bowl
     # actually has food. If it's confirmed empty, close it and rotate to the next loaded plate,
     # so a wrong/empty plate doesn't mean a midnight rescue. Off by default (it moves the tray
@@ -219,6 +225,9 @@ class Secrets:
     dash_password: str
     dash_public_url: str
     kasa_camera_mac: str = ""
+    # Second camera, pointed at Grrr's bed (optional). Same {host} + MAC lookup as the feeder's.
+    bed_stream_url: str = ""
+    bed_camera_mac: str = ""
     # Email/SMS alerts (optional). SMS = email a carrier gateway address (see .env.example).
     smtp_host: str = ""
     smtp_port: int = 587
@@ -253,6 +262,8 @@ class Secrets:
             dash_password=env("DASH_PASSWORD", ""),
             dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8081").rstrip("/"),
             kasa_camera_mac=env("KASA_CAMERA_MAC", ""),
+            bed_stream_url=env("BED_STREAM_URL", ""),
+            bed_camera_mac=env("BED_CAMERA_MAC", ""),
             smtp_host=env("SMTP_HOST", ""),
             smtp_port=int(env("SMTP_PORT", "587") or "587"),
             smtp_user=env("SMTP_USER", ""),

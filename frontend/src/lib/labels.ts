@@ -34,6 +34,8 @@ export const EVENTS: Record<string, [string, string]> = {
   feeder_not_back: ["⚠️", "Feeder not confirmed back; trying anyway"],
   feed_given_up: ["🛑", "Feed given up after retries"], retry_held: ["⏸️", "Retry held: another animal in view"],
   config: ["⚙️", "Settings changed"],
+  bed_in: ["🛏️", "Grrr in bed"], bed_out: ["🐾", "Grrr out of bed"],
+  bed_camera_offline: ["📵", "Bed camera offline"], bed_camera_online: ["📶", "Bed camera back online"],
 };
 
 export const fmtAge = (s: number | null) =>
@@ -56,6 +58,27 @@ export function verdictText(s: Status): { who: string; why: string } {
     who: `${names[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}${age}`,
     why: v.reason || "",
   };
+}
+
+const fmtFor = (s: number | null) =>
+  s == null ? "" : s < 90 ? ` · ${s}s` : s < 5400 ? ` · ${Math.round(s / 60)}m` : ` · ${(s / 3600).toFixed(1)}h`;
+
+/** In bed / up, from the bed camera. `who` is the short state, `why` what the detector last saw. */
+export function bedText(s: Status): { who: string; why: string } {
+  const b = s.bed;
+  if (!b) return { who: "No bed camera", why: "" };
+  if (b.camera_offline) return { who: "Bed camera offline", why: "Last known: " + (b.state === "in" ? "in bed" : b.state === "out" ? "up" : "nothing yet") };
+  const who =
+    b.state === "in" ? "Grrr is in bed" + fmtFor(b.for_s)
+    : b.state === "out" ? "Grrr is up" + fmtFor(b.for_s)
+    : "Not sure yet";
+  const v = b.verdict;
+  const names = nameMap(s.personas);
+  const saw = !v ? "No read yet"
+    : v.animal === "none" ? "Bed looks empty"
+    : v.animal === "unsure" ? "Something in the bed, not sure who"
+    : `Sees ${names[v.animal] || v.animal} · ${Math.round((v.confidence || 0) * 100)}%`;
+  return { who, why: saw };
 }
 
 export function motionText(s: Status): string {

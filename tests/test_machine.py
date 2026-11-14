@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from animaleyes.camera import FrameBuffer
 from animaleyes.detect import FeedingVerdict, Verdict
 from tests.conftest import (
     BOWIE,
@@ -1101,3 +1102,110 @@ def test_no_bedtime_reminder_once_we_are_in_bed(tmp_path) -> None:
     in_bed(h)
     h.tick(motion=False, seconds=4 * 3600)
     assert not h.events("bedtime_reminder")
+
+
+# --- second camera on Grrr's bed ------------------------------------------------------------
+NOBODY = Verdict(animal="none", confidence=0.0, at_bowl=False, reason="no animal detected")
+
+
+def bed_harness(tmp_path, start: datetime = datetime(2026, 9, 24, 22, 0)) -> Harness:
+    """A harness with a bed camera and the free local detector looking only at the bed."""
+    h = Harness(tmp_path, start=start)
+    h.capture_gate = FakeLLM()
+    h.bed_frames = FrameBuffer()
+    h.config.update({"ALWAYS_WATCH": False, "BED_WATCH_INTERVAL_S": 5, "BED_CONFIRMATIONS": 3})
+    h.machine = h.new_machine()
+    return h
+
+
+def test_bed_camera_tracks_grrr_in_and_out_of_bed(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=10, motion=False)
+    assert h.machine.bed_status(h.clock.now)["state"] is None  # two reads: not yet believed
+    h.run(seconds=5, motion=False)
+    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    assert len(h.events("bed_in")) == 1 and h.events("bed_in")[0].frames
+    h.clock.advance(minutes=42)
+    h.capture_gate.identify_result = NOBODY
+    h.run(seconds=15, motion=False)
+    status = h.machine.bed_status(h.clock.now)
+    assert status["state"] == "out" and status["for_s"] < 5
+    assert "after 42 min in it" in h.events("bed_out")[0].reason
+    h.run(seconds=60, motion=False)
+    assert len(h.events("bed_in")) == 1 and len(h.events("bed_out")) == 1  # no repeats
+
+
+def test_bed_state_ignores_unsure_reads_other_animals_and_single_blips(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=15, motion=False)
+    for not_a_vote in (UNSURE, BOWIE, CAT):
+        h.capture_gate.identify_result = not_a_vote
+        h.run(seconds=30, motion=False)
+        assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    for _ in range(4):  # an empty read now and then never adds up to three in a row
+        h.capture_gate.identify_result = NOBODY
+        h.run(seconds=10, motion=False)
+        h.capture_gate.identify_result = GRRR
+        h.run(seconds=5, motion=False)
+    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    assert h.events("bed_out") == []
+
+
+def test_bed_state_survives_a_restart(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=15, motion=False)
+    h.machine = h.new_machine()
+    h.machine.start()
+    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    h.run(seconds=30, motion=False)
+    assert len(h.events("bed_in")) == 1
+
+
+def test_grrr_in_bed_never_opens_the_feeder(tmp_path) -> None:
+    """The bed camera is visibility only: Grrr on it is not a sighting at the bowl."""
+    h = bed_harness(tmp_path)
+    h.load_plates(1)
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=120)  # motion at the bowl the whole time; the feeder camera's LLM says unsure
+    assert h.machine.bed_status(h.clock.now)["state"] == "in"
+    assert h.feeder.calls == []
+    assert h.events("open") == []
+
+
+def test_bed_camera_does_not_change_a_normal_feed(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.load_plates(1)
+    h.capture_gate.identify_result = NOBODY  # she's out of bed...
+    h.llm.identify_result = GRRR  # ...and at the bowl
+    h.run(seconds=30)
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_bed_camera_offline_is_logged_and_does_not_stop_feeding(tmp_path) -> None:
+    h = bed_harness(tmp_path)
+    h.load_plates(1)
+    h.tick(motion=False)
+    h.bed_frames = None  # the harness stops pushing bed frames; the machine keeps its buffer
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=90, motion=False)
+    assert len(h.events("bed_camera_offline")) == 1
+    assert h.events("camera_offline") == []
+    assert h.machine.bed_status(h.clock.now)["camera_offline"] is True
+    assert h.machine.bed_status(h.clock.now)["state"] is None  # no reads off a dead camera
+    h.llm.identify_result = GRRR
+    h.run(seconds=30)
+    assert h.feeder.opens == ["open:1"]
+    h.bed_frames = h.machine.bed_frames
+    h.tick(motion=False)
+    assert len(h.events("bed_camera_online")) == 1
+
+
+def test_no_bed_camera_means_no_bed_status_or_reads(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.config.update({"ALWAYS_WATCH": False})
+    h.run(seconds=30, motion=False)
+    assert h.machine.bed_status(h.clock.now) is None
+    assert h.capture_gate.identify_calls == 0

@@ -50,6 +50,20 @@ export type Status = {
   feeding_since: string | null;
   feed_start: string;
   settle: Settle | null;
+  bed: Bed | null; // second camera on Grrr's bed; null when there isn't one
+  bed_ptz_available: boolean;
+};
+
+export type Cam = "feeder" | "bed";
+
+export type Bed = {
+  state: "in" | "out" | null;
+  since: string | null;
+  for_s: number | null;
+  camera_offline: boolean;
+  camera_age_s: number | null;
+  verdict: Verdict | null;
+  verdict_age_s: number | null;
 };
 
 export type Settle = {
